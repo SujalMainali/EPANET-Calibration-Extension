@@ -65,4 +65,12 @@ def build_example_raw_params() -> dict:
             "report_timestep_s": 3600,
             "report_start_s": 0,
         },
+        "solver": {
+            "trials": 200,
+            "accuracy": 0.001,
+            "unbalanced": "CONTINUE",
+            "damplimit": 0.1,
+            "checkfreq": 2,
+            "maxcheck": 10,
+        },
     }

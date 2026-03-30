@@ -50,6 +50,14 @@ class HydraulicModelLayerENepanet:
         wn_model.options.time.pattern_timestep = params.time.report_timestep_s
         wn_model.options.time.pattern_start = 0
 
+        # Solver/convergence controls
+        wn_model.options.hydraulic.trials = int(params.solver.trials)
+        wn_model.options.hydraulic.accuracy = float(params.solver.accuracy)
+        wn_model.options.hydraulic.unbalanced = str(params.solver.unbalanced).upper()
+        wn_model.options.hydraulic.damplimit = float(params.solver.damplimit)
+        wn_model.options.hydraulic.checkfreq = int(params.solver.checkfreq)
+        wn_model.options.hydraulic.maxcheck = int(params.solver.maxcheck)
+
     def apply_service_node_demands(
         self,
         wn_model: "wntr.network.WaterNetworkModel",
@@ -113,6 +121,17 @@ class HydraulicModelLayerENepanet:
             en.ENsettimeparam(C_HYDSTEP, params.time.hydraulic_timestep_s)
             en.ENsettimeparam(C_REPORTSTEP, params.time.report_timestep_s)
             en.ENsettimeparam(C_REPORTSTART, params.time.report_start_s)
+
+            # Some bindings behave more predictably when pattern timing is set explicitly.
+            # These params exist in EPANET 2.x but constant names can vary.
+            for cname, value in (
+                ("PATTERNSTEP", params.time.report_timestep_s),
+                ("PATTERNSTART", 0),
+            ):
+                try:
+                    en.ENsettimeparam(EN_const(cname), int(value))
+                except Exception:
+                    pass
 
             nodes_to_read = sorted(
                 set(metadata.sensor_nodes)
@@ -224,6 +243,14 @@ class HydraulicModelLayerENepanet:
                     "required_pressure": wn_model.options.hydraulic.required_pressure,
                     "pressure_exponent": wn_model.options.hydraulic.pressure_exponent,
                     "emitter_exponent": getattr(wn_model.options.hydraulic, "emitter_exponent", None),
+                },
+                "solver_settings_written_to_inp": {
+                    "trials": wn_model.options.hydraulic.trials,
+                    "accuracy": wn_model.options.hydraulic.accuracy,
+                    "unbalanced": wn_model.options.hydraulic.unbalanced,
+                    "damplimit": wn_model.options.hydraulic.damplimit,
+                    "checkfreq": wn_model.options.hydraulic.checkfreq,
+                    "maxcheck": wn_model.options.hydraulic.maxcheck,
                 },
                 "expected_time_index": expected_times,
                 "actual_time_index": times_s,

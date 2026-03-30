@@ -5,6 +5,7 @@ from __future__ import annotations
 from calibration.datamodels import (
     CarryoverSettings,
     GlobalDemandSettings,
+    HydraulicSolverSettings,
     ModelMetadata,
     ModelParameters,
     PatternFamilyParams,
@@ -69,6 +70,16 @@ class ParameterizationLayer:
             report_start_s=int(tm.get("report_start_s", 0)),
         )
 
+        sv = raw.get("solver", {})
+        params.solver = HydraulicSolverSettings(
+            trials=int(sv.get("trials", params.solver.trials)),
+            accuracy=float(sv.get("accuracy", params.solver.accuracy)),
+            unbalanced=str(sv.get("unbalanced", params.solver.unbalanced)).upper(),
+            damplimit=float(sv.get("damplimit", params.solver.damplimit)),
+            checkfreq=int(sv.get("checkfreq", params.solver.checkfreq)),
+            maxcheck=int(sv.get("maxcheck", params.solver.maxcheck)),
+        )
+
         self._validate(params)
         return params
 
@@ -83,3 +94,13 @@ class ParameterizationLayer:
             raise ValueError("demand_multiplier must be > 0")
         if params.time.hydraulic_timestep_s <= 0 or params.time.report_timestep_s <= 0:
             raise ValueError("timesteps must be > 0")
+        if params.solver.trials <= 0:
+            raise ValueError("solver.trials must be > 0")
+        if params.solver.accuracy <= 0:
+            raise ValueError("solver.accuracy must be > 0")
+        if params.solver.unbalanced not in {"STOP", "CONTINUE"}:
+            raise ValueError("solver.unbalanced must be STOP or CONTINUE")
+        if params.solver.damplimit < 0:
+            raise ValueError("solver.damplimit must be >= 0")
+        if params.solver.checkfreq <= 0 or params.solver.maxcheck <= 0:
+            raise ValueError("solver.checkfreq and solver.maxcheck must be > 0")

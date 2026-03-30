@@ -56,6 +56,21 @@ class TimeSettings:
 
 
 @dataclass
+class HydraulicSolverSettings:
+    """Hydraulic solver controls that can affect convergence and halting.
+
+    These map to EPANET [OPTIONS] fields like TRIALS, ACCURACY, UNBALANCED, etc.
+    """
+
+    trials: int = 40
+    accuracy: float = 0.001
+    unbalanced: str = "STOP"  # STOP or CONTINUE
+    damplimit: float = 0.0
+    checkfreq: int = 2
+    maxcheck: int = 10
+
+
+@dataclass
 class ModelParameters:
     pda: PDASettings = field(default_factory=PDASettings)
     pattern_family: PatternFamilyParams = field(default_factory=PatternFamilyParams)
@@ -63,6 +78,7 @@ class ModelParameters:
     leakage: ZoneLeakageSettings = field(default_factory=ZoneLeakageSettings)
     demand: GlobalDemandSettings = field(default_factory=GlobalDemandSettings)
     time: TimeSettings = field(default_factory=TimeSettings)
+    solver: HydraulicSolverSettings = field(default_factory=HydraulicSolverSettings)
 
 
 @dataclass
