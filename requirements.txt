@@ -1,0 +1,4 @@
+# Core dependencies for the layered EPANET/WNTR calibration scaffold
+wntr
+numpy
+pandas
