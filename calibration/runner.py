@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Tuple, TypedDict, cast
+from typing import TYPE_CHECKING, Any, Dict, Tuple, TypedDict, cast
 
 import pandas as pd
 
@@ -10,6 +10,10 @@ from calibration.behavior_layer import BehaviorLayer
 from calibration.datamodels import ModelMetadata, ModelParameters
 from calibration.hydraulic_layer_enepanet import HydraulicModelLayerENepanet
 from calibration.parameterization_layer import ParameterizationLayer
+
+
+if TYPE_CHECKING:
+    from calibration.objective import ObjectiveConfig
 
 
 class RunResults(TypedDict):
@@ -73,6 +77,31 @@ class LayeredModelRunner:
         summary_df.attrs["unmet_daily_m3"] = unmet
         summary_df.attrs["run_debug"] = results["debug"]
         return summary_df
+
+    def evaluate_objective(
+        self,
+        raw_params: dict,
+        observed_pressure: pd.DataFrame,
+        *,
+        config: "ObjectiveConfig | None" = None,
+        sensor_weights: "dict[str, float] | None" = None,
+    ) -> Tuple[float, Dict[str, float]]:
+        """Run once and evaluate the composite objective J(θ).
+
+        This is a convenience wrapper intended for optimizers.
+        """
+
+        from calibration.objective import compute_objective
+
+        _, results, params = self.build_and_run_once(raw_params)
+        return compute_objective(
+            params=params,
+            metadata=self.metadata,
+            results=results,
+            observed_pressure=observed_pressure,
+            config=config,
+            sensor_weights=sensor_weights,
+        )
 
 
 def build_runner(inp_path: str, metadata: ModelMetadata) -> LayeredModelRunner:
