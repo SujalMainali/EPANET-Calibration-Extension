@@ -27,9 +27,14 @@ class BehaviorLayer:
         return normalize24(raw)
 
     def build_node_hourly_demands_m3ph(self, params: ModelParameters, node_meta: ServiceNodeMeta) -> np.ndarray:
+        days = int(max(1, params.time.duration_days))
         daily_target = node_meta.base_daily_volume_m3 * params.demand.demand_multiplier
         preferred_pattern = self.build_preferred_pattern(params.pattern_family)
         preferred_hourly = daily_target * preferred_pattern / 24.0
+
+        # For multi-day simulations, repeat the same 24-hour shape.
+        if days > 1:
+            preferred_hourly = np.tile(preferred_hourly, days)
 
         if not params.carryover.enabled:
             return preferred_hourly

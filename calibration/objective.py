@@ -525,10 +525,12 @@ def _j_volume(params: ModelParameters, metadata: ModelMetadata, demand_df: pd.Da
         return 0.0
 
     dt = float(params.time.report_timestep_s)
+    days = float(max(1, int(getattr(params.time, "duration_days", 1) or 1)))
 
     errs = []
     for node_name, meta in metadata.service_nodes.items():
-        target_m3 = float(meta.base_daily_volume_m3) * float(params.demand.demand_multiplier)
+        # Compare delivered vs target total volume over the simulated horizon.
+        target_m3 = float(meta.base_daily_volume_m3) * float(params.demand.demand_multiplier) * days
         if target_m3 <= 0:
             continue
 

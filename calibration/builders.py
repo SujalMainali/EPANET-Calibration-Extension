@@ -275,17 +275,17 @@ def build_example_raw_params() -> dict:
         "pda": {
             "demand_model": "PDA",
             "minimum_pressure": 3.0,
-            "required_pressure": 12.0,
+            "required_pressure": 22.0,
             "pressure_exponent": 0.5,
         },
         "pattern_family": {
-            "morning_center": 7.5,
-            "morning_width": 1.5,
-            "morning_weight": 0.72,
-            "evening_center": 19.0,
-            "evening_width": 1.2,
-            "evening_weight": 0.18,
-            "background_weight": 0.10,
+            "morning_center": 6.0,
+            "morning_width": 1.7,
+            "morning_weight": 0.55,
+            "evening_center": 21.5,
+            "evening_width": 2.0,
+            "evening_weight": 0.30,
+            "background_weight": 0.15,
             "floor": 0.02,
         },
         "carryover": {
@@ -294,8 +294,8 @@ def build_example_raw_params() -> dict:
             "max_carryover_multiplier": 2.0,
         },
         "leakage": {
-            "zone_multipliers": {"Z1": 1.0, "Z2": 1.3},
-            "emitter_exponent": 0.5,
+            "zone_multipliers": {},
+            "emitter_exponent": 1.0,
         },
         "demand": {
             "demand_multiplier": 1.0,

@@ -47,6 +47,18 @@ def _coerce_index_to_seconds(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _resolve_existing_path(path: str) -> str:
+    p = Path(path)
+    if p.exists():
+        return str(p)
+    alt = Path(__file__).resolve().parent / path
+    if alt.exists():
+        return str(alt)
+    raise FileNotFoundError(
+        f"Observed CSV not found: {path!r}. Tried: {str(p.resolve())!r} and {str(alt.resolve())!r}"
+    )
+
+
 def _align_sim_to_obs_index(obs: pd.DataFrame, sim: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     obs = obs.sort_index()
     sim = sim.sort_index()
@@ -96,10 +108,12 @@ def _load_observed_from_config() -> pd.DataFrame:
             "Set OBSERVED_PRESSURE_CSV in config.py to the observed pressure CSV path."
         )
 
-    if config.OBSERVED_TIME_COLUMN is None:
-        return load_observed_pressure_csv(config.OBSERVED_PRESSURE_CSV)
+    obs_path = _resolve_existing_path(config.OBSERVED_PRESSURE_CSV)
 
-    df = pd.read_csv(config.OBSERVED_PRESSURE_CSV)
+    if config.OBSERVED_TIME_COLUMN is None:
+        return load_observed_pressure_csv(obs_path)
+
+    df = pd.read_csv(obs_path)
     if config.OBSERVED_TIME_COLUMN not in df.columns:
         raise ValueError(
             f"OBSERVED_TIME_COLUMN={config.OBSERVED_TIME_COLUMN!r} not found in observed CSV columns."

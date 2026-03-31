@@ -34,7 +34,12 @@ SENSOR_NODES: list[str] = [
 # ---- Observations (pressures at sensor nodes) ----
 # Provide the observed pressure CSV here.
 # Expected: one time column + sensor columns (matching SENSOR_NODES).
-OBSERVED_PRESSURE_CSV: str | None = "Calibrated_hourly_2025-12-18_Final_t.csv"
+OBSERVED_PRESSURE_CSV: str | None = None
+
+# Optional: provide multiple observed CSVs (e.g., one per day). If set, this list is used
+# and OBSERVED_PRESSURE_CSV is ignored. Each CSV can have its own time column, but the
+# column name must be the same across files if you set OBSERVED_TIME_COLUMN.
+OBSERVED_PRESSURE_CSVS: list[str] | None = ["Data/HourlyData_2025-12-18.csv", "Data/HourlyData_2025-12-19.csv", "Data/HourlyData_2025-12-20.csv", "Data/HourlyData_2025-12-21.csv"]
 
 # Optional: if your observed CSV's time column is NOT the first column, set it here.
 # If None, the loader assumes the first column is the time column.
@@ -64,6 +69,43 @@ REPORTS_DIR = OUTPUT_DIR / "reports"
 SAVE_CSV = True
 SAVE_DEBUG_JSON = True
 VERBOSE = True
+
+
+# ---- Optimizer (gradient descent) ----
+
+# Which raw parameter paths to optimize.
+# Examples:
+#   - "demand.demand_multiplier"
+#   - "pda.required_pressure"
+#   - "pattern_family.morning_center"
+#   - "leakage.zone_multipliers.Z_NW"   (if you enable zone leakage)
+OPT_PARAM_PATHS: list[str] = [
+    "demand.demand_multiplier",
+    "pda.required_pressure",
+]
+
+# Optional bounds per parameter path.
+# Any param not listed here is left unbounded.
+OPT_BOUNDS: dict[str, tuple[float, float]] = {
+    "demand.demand_multiplier": (0.5, 1.8),
+    "pda.required_pressure": (8.0, 35.0),
+}
+
+# Gradient descent settings
+OPT_MAX_ITERS: int = 20
+OPT_LEARNING_RATE: float = 0.5
+OPT_LEARNING_RATE_DECAY: float = 0.95
+
+# Finite-difference step sizing
+OPT_FD_EPS_REL: float = 1e-2  # eps = eps_rel * max(1, |x|)
+OPT_FD_EPS_ABS: float = 1e-3  # absolute floor
+
+# Stop when relative improvement is small
+OPT_TOL_REL: float = 1e-4
+
+# Output
+OPT_HISTORY_CSV = REPORTS_DIR / "opt_history.csv"
+OPT_BEST_PARAMS_JSON = REPORTS_DIR / "best_params.json"
 
 
 def build_default_metadata():
