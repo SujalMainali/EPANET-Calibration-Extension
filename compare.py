@@ -24,6 +24,7 @@ import numpy as np
 import pandas as pd
 
 import config
+from calibration.objective import ObjectiveConfig, ObjectiveWeights
 from calibration.objective import load_observed_pressure_csv
 from calibration.runner import RunResults, build_runner
 
@@ -171,8 +172,18 @@ def main() -> None:
         obs_aligned.to_csv(obs_csv, index=True)
         sim_aligned.to_csv(sim_csv, index=True)
 
-    # Compute objective using the shared objective function.
-    j_total, breakdown = runner.evaluate_objective(raw_params, observed_pressure=obs_pressure)
+    # Compute objective using the shared objective function (weights from config.py).
+    w = getattr(config, "OBJECTIVE_WEIGHTS", None) or {}
+    obj_cfg = ObjectiveConfig(
+        weights=ObjectiveWeights(
+            w_ts=float(w.get("w_ts", 0.40)),
+            w_feat=float(w.get("w_feat", 0.30)),
+            w_sp=float(w.get("w_sp", 0.15)),
+            w_vol=float(w.get("w_vol", 0.10)),
+            w_reg=float(w.get("w_reg", 0.05)),
+        )
+    )
+    j_total, breakdown = runner.evaluate_objective(raw_params, observed_pressure=obs_pressure, config=obj_cfg)
     breakdown = dict(breakdown)
     breakdown["J_total"] = float(j_total)
 

@@ -115,6 +115,19 @@ SAVE_DEBUG_JSON = True
 VERBOSE = True
 
 
+# ---- Objective function weights (editable) ----
+# Controls the combined objective:
+#   J = w_ts*J_timeseries + w_feat*J_features + w_sp*J_spatial + w_vol*J_volume + w_reg*J_regularization
+# Used by optimize.py (and compare.py).
+OBJECTIVE_WEIGHTS: dict[str, float] = {
+    "w_ts": 0.40,
+    "w_feat": 0.30,
+    "w_sp": 0.15,
+    "w_vol": 0.10,
+    "w_reg": 0.05,
+}
+
+
 # ---- Optimizer (gradient descent) ----
 
 # Which raw parameter paths to optimize.
@@ -177,7 +190,7 @@ OPT_BOUNDS: dict[str, tuple[float, float]] = {
     "pattern_family.evening_weight": (0.0, 5.0),
     "pattern_family.background_weight": (0.0, 5.0),
     # Keep a tiny floor so the pattern sum stays positive even if all weights drift to 0.
-    "pattern_family.floor": (0.0, 2.0),
+    "pattern_family.floor": (1e-6, 2.0),
 
     # Exponents close to zero can lead to numerical issues.
     "pda.pressure_exponent": (0.05, 5.0),

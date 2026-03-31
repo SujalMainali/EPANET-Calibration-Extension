@@ -30,6 +30,7 @@ import numpy as np
 import pandas as pd
 
 import config
+from calibration.objective import ObjectiveConfig, ObjectiveWeights
 from calibration.objective import load_observed_pressure_csv
 from calibration.runner import build_runner
 
@@ -217,6 +218,18 @@ def _finite_difference_grad(
     return float((j_plus - j_minus) / (x_plus - x_minus))
 
 
+def _objective_config_from_config() -> ObjectiveConfig:
+    w = getattr(config, "OBJECTIVE_WEIGHTS", None) or {}
+    ow = ObjectiveWeights(
+        w_ts=float(w.get("w_ts", 0.40)),
+        w_feat=float(w.get("w_feat", 0.30)),
+        w_sp=float(w.get("w_sp", 0.15)),
+        w_vol=float(w.get("w_vol", 0.10)),
+        w_reg=float(w.get("w_reg", 0.05)),
+    )
+    return ObjectiveConfig(weights=ow)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Calibrate parameters via gradient descent")
     parser.add_argument(
@@ -234,13 +247,14 @@ def main() -> None:
 
     metadata = config.build_default_metadata()
     runner = build_runner(inp_path=config.MODEL_INP, metadata=metadata)
+    obj_cfg = _objective_config_from_config()
 
     def eval_J(rp_in: Dict[str, Any]) -> tuple[float, Dict[str, float]]:
         rp = copy.deepcopy(rp_in)
         rp.setdefault("time", {})
         rp["time"]["duration_days"] = int(max(1, n_days))
         try:
-            j, breakdown = runner.evaluate_objective(rp, observed_pressure=observed)
+            j, breakdown = runner.evaluate_objective(rp, observed_pressure=observed, config=obj_cfg)
             j = float(j)
             if not np.isfinite(j):
                 raise RuntimeError(f"Non-finite objective returned: {j!r}")
