@@ -148,6 +148,9 @@ OPT_PARAM_PATHS: list[str] = [
     "pattern_family.morning_center",
     "pattern_family.morning_width",
     "pattern_family.morning_weight",
+    "pattern_family.noon_center",
+    "pattern_family.noon_width",
+    "pattern_family.noon_weight",
     "pattern_family.evening_center",
     "pattern_family.evening_width",
     "pattern_family.evening_weight",
@@ -183,10 +186,13 @@ OPT_BOUNDS: dict[str, tuple[float, float]] = {
     # Centers are hours in [0, 23]. Widths are in hours and must be > 0.
     # Weights and floor are kept non-negative to avoid negative hourly demands.
     "pattern_family.morning_center": (0.0, 23.0),
+    "pattern_family.noon_center": (0.0, 23.0),
     "pattern_family.evening_center": (0.0, 23.0),
     "pattern_family.morning_width": (0.05, 8.0),
+    "pattern_family.noon_width": (0.05, 8.0),
     "pattern_family.evening_width": (0.05, 8.0),
     "pattern_family.morning_weight": (0.0, 5.0),
+    "pattern_family.noon_weight": (0.0, 5.0),
     "pattern_family.evening_weight": (0.0, 5.0),
     "pattern_family.background_weight": (0.0, 5.0),
     # Keep a tiny floor so the pattern sum stays positive even if all weights drift to 0.

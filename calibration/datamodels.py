@@ -22,6 +22,12 @@ class PatternFamilyParams:
     morning_center: float = 7.5
     morning_width: float = 1.5
     morning_weight: float = 0.72
+
+    # Optional third spike to better match mid-day pressure/demand behavior.
+    noon_center: float = 12.5
+    noon_width: float = 1.5
+    noon_weight: float = 0.0
+
     evening_center: float = 19.0
     evening_width: float = 1.2
     evening_weight: float = 0.18

@@ -20,6 +20,7 @@ class BehaviorLayer:
         hrs = np.arange(24, dtype=float)
         raw = (
             pf.morning_weight * gaussian(hrs, pf.morning_center, pf.morning_width)
+            + pf.noon_weight * gaussian(hrs, pf.noon_center, pf.noon_width)
             + pf.evening_weight * gaussian(hrs, pf.evening_center, pf.evening_width)
             + np.full(24, pf.background_weight, dtype=float)
             + pf.floor

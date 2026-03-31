@@ -35,6 +35,9 @@ class ParameterizationLayer:
             morning_center=float(pf.get("morning_center", 7.5)),
             morning_width=float(pf.get("morning_width", 1.5)),
             morning_weight=float(pf.get("morning_weight", 0.72)),
+            noon_center=float(pf.get("noon_center", 12.5)),
+            noon_width=float(pf.get("noon_width", 1.5)),
+            noon_weight=float(pf.get("noon_weight", 0.0)),
             evening_center=float(pf.get("evening_center", 19.0)),
             evening_width=float(pf.get("evening_width", 1.2)),
             evening_weight=float(pf.get("evening_weight", 0.18)),
@@ -93,7 +96,11 @@ class ParameterizationLayer:
             raise ValueError("leakage.global_scale must be >= 0")
         if params.leakage.emitter_exponent is not None and params.leakage.emitter_exponent <= 0:
             raise ValueError("leakage.emitter_exponent must be > 0")
-        if params.pattern_family.morning_width <= 0 or params.pattern_family.evening_width <= 0:
+        if (
+            params.pattern_family.morning_width <= 0
+            or params.pattern_family.noon_width <= 0
+            or params.pattern_family.evening_width <= 0
+        ):
             raise ValueError("pattern widths must be > 0")
         if params.demand.demand_multiplier <= 0:
             raise ValueError("demand_multiplier must be > 0")
