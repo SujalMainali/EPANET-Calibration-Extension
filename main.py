@@ -44,6 +44,13 @@ def main() -> None:
     metadata = config.build_default_metadata()
     raw_params = config.build_default_raw_params()
 
+    # If multi-day observed data is configured, default to running that many days so
+    # the produced time series aligns with the calibration horizon.
+    if config.OBSERVED_PRESSURE_CSVS:
+        raw_params = dict(raw_params)
+        raw_params.setdefault("time", {})
+        raw_params["time"]["duration_days"] = int(max(1, len(config.OBSERVED_PRESSURE_CSVS)))
+
     runner = build_runner(inp_path=inp_path, metadata=metadata)
     _, results, _ = runner.build_and_run_once(raw_params)
     results = cast(RunResults, results)

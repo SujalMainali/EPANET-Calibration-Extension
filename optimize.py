@@ -185,8 +185,19 @@ def main() -> None:
         rp = copy.deepcopy(rp_in)
         rp.setdefault("time", {})
         rp["time"]["duration_days"] = int(max(1, n_days))
-        j, breakdown = runner.evaluate_objective(rp, observed_pressure=observed)
-        return float(j), dict(breakdown)
+        try:
+            j, breakdown = runner.evaluate_objective(rp, observed_pressure=observed)
+            j = float(j)
+            if not np.isfinite(j):
+                raise RuntimeError(f"Non-finite objective returned: {j!r}")
+            return j, dict(breakdown)
+        except Exception as e:
+            # Penalize invalid runs heavily so gradient descent backs away.
+            # Keep this finite so comparisons behave predictably.
+            penalty = 1e9
+            if config.VERBOSE:
+                print(f"[eval_J] Penalizing failed run: {type(e).__name__}: {e}")
+            return float(penalty), {"J_total": float(penalty), "J_failed": float(penalty)}
 
     # Start from config defaults
     raw_params: Dict[str, Any] = config.build_default_raw_params()

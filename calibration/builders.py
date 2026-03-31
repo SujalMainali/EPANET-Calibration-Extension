@@ -360,7 +360,7 @@ def build_example_raw_params() -> dict:
         "pda": {
             "demand_model": "PDA",
             "minimum_pressure": 3.0,
-            "required_pressure": 22.0,
+            "required_pressure": 18.0,
             "pressure_exponent": 0.5,
         },
         "pattern_family": {
@@ -379,8 +379,8 @@ def build_example_raw_params() -> dict:
             "max_carryover_multiplier": 2.0,
         },
         "leakage": {
-                "global_scale": 0.0,
-            "zone_multipliers": {"Z1": 1.0, "Z2": 1.3},
+                "global_scale": 0.4,
+            "zone_multipliers": {"Z_A": 1.2, "Z_B": 1.3, "Z_C": 1.1, "Z_D": 0.9},
             "emitter_exponent": 1.0,
         },
         "demand": {

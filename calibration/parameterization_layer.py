@@ -91,6 +91,8 @@ class ParameterizationLayer:
             raise ValueError("pressure_exponent must be > 0")
         if params.leakage.global_scale < 0:
             raise ValueError("leakage.global_scale must be >= 0")
+        if params.leakage.emitter_exponent is not None and params.leakage.emitter_exponent <= 0:
+            raise ValueError("leakage.emitter_exponent must be > 0")
         if params.pattern_family.morning_width <= 0 or params.pattern_family.evening_width <= 0:
             raise ValueError("pattern widths must be > 0")
         if params.demand.demand_multiplier <= 0:

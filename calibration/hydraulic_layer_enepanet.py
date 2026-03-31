@@ -139,6 +139,13 @@ class HydraulicModelLayerENepanet:
 
         inp_tmp, rpt_tmp, out_tmp = self.write_temp_inp(wn_model)
 
+        def _tail_text(path: Path, n: int = 40) -> str:
+            try:
+                lines = path.read_text(errors="ignore").splitlines()
+                return "\n".join(lines[-n:])
+            except Exception:
+                return ""
+
         en = ENepanet()
         en.ENopen(str(inp_tmp), str(rpt_tmp), str(out_tmp))
         try:
@@ -244,6 +251,20 @@ class HydraulicModelLayerENepanet:
 
             pressure_df = expand_to_report_times(pressure_df, expected_times)
             demand_df = expand_to_report_times(demand_df, expected_times)
+
+            # Guard: if EPANET produced NaNs everywhere, do not silently continue.
+            # This commonly happens with numerically unstable leakage/emitter settings.
+            arr_p = pressure_df.to_numpy(dtype=float)
+            if not np.isfinite(arr_p).any():
+                rpt_tail = _tail_text(Path(rpt_tmp), n=60)
+                hint = (
+                    "EPANET returned no finite pressures (all NaN). "
+                    "This usually indicates an unbalanced/unstable hydraulic solution "
+                    "(e.g., too-aggressive emitters or an emitter exponent too close to 0)."
+                )
+                raise RuntimeError(
+                    f"{hint}\nReport tail ({Path(rpt_tmp)}):\n{rpt_tail}" if rpt_tail else hint
+                )
 
             actual_summary = summarize_time_index(times_s)
             expected_summary = summarize_time_index(expected_times)

@@ -153,9 +153,12 @@ OPT_BOUNDS: dict[str, tuple[float, float]] = {
     # Guard rails for parameters that must stay non-negative / positive to satisfy
     # validation in calibration/parameterization_layer.py.
     "demand.demand_multiplier": (1e-6, 10.0),
-    "pda.pressure_exponent": (1e-6, 5.0),
+    # Exponents close to zero can lead to numerical issues.
+    "pda.pressure_exponent": (0.05, 5.0),
     "leakage.global_scale": (0.0, 50.0),
-    "leakage.emitter_exponent": (1e-6, 5.0),
+    # EPANET emitter law is Q = C * P^n. Extremely small n can produce NaNs
+    # (e.g., when pressures dip negative). Keep n in a reasonable range.
+    "leakage.emitter_exponent": (0.1, 2.0),
 
     # Optional tighter bounds (uncomment if you want a smaller search space):
     # "pda.required_pressure": (8.0, 35.0),
@@ -172,7 +175,7 @@ if LEAKS_ENABLED:
 
 # Gradient descent settings
 OPT_MAX_ITERS: int = 100
-OPT_LEARNING_RATE: float = 0.5
+OPT_LEARNING_RATE: float = 0.05
 OPT_LEARNING_RATE_DECAY: float = 0.95
 
 # Finite-difference step sizing
