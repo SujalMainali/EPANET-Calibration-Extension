@@ -80,7 +80,7 @@ class BehaviorLayer:
         out = {}
         for node_name, meta in self.metadata.leak_nodes.items():
             zone_mult = params.leakage.zone_multipliers.get(meta.zone, 0.0)
-            out[node_name] = zone_mult * meta.weight
+            out[node_name] = float(params.leakage.global_scale) * zone_mult * meta.weight
         return out
 
     def update_unmet_from_demand_df(

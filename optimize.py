@@ -144,6 +144,35 @@ def _finite_difference_eps(x: float) -> float:
     return float(max(config.OPT_FD_EPS_ABS, config.OPT_FD_EPS_REL * max(1.0, abs(float(x)))))
 
 
+def _finite_difference_grad(
+    eval_J,
+    raw_params: Dict[str, Any],
+    path: str,
+    x: float,
+    eps: float,
+) -> float:
+    """Bounds-aware finite-difference gradient for one scalar parameter.
+
+    Uses the *actual* (possibly clipped) step size in the denominator.
+    This matters a lot near bounds (e.g., leakage.global_scale at 0).
+    """
+
+    x_plus = _apply_bounds(path, x + eps)
+    x_minus = _apply_bounds(path, x - eps)
+
+    if np.isclose(x_plus, x_minus):
+        return 0.0
+
+    rp_plus = copy.deepcopy(raw_params)
+    rp_minus = copy.deepcopy(raw_params)
+    _set_by_path(rp_plus, path, x_plus)
+    _set_by_path(rp_minus, path, x_minus)
+
+    j_plus, _ = eval_J(rp_plus)
+    j_minus, _ = eval_J(rp_minus)
+    return float((j_plus - j_minus) / (x_plus - x_minus))
+
+
 def main() -> None:
     _ensure_dirs()
 
@@ -201,50 +230,55 @@ def main() -> None:
             x = _get_by_path(raw_params, p)
             eps = _finite_difference_eps(x)
 
-            rp_plus = copy.deepcopy(raw_params)
-            rp_minus = copy.deepcopy(raw_params)
-            _set_by_path(rp_plus, p, _apply_bounds(p, x + eps))
-            _set_by_path(rp_minus, p, _apply_bounds(p, x - eps))
+            grads[p] = _finite_difference_grad(eval_J, raw_params, p, x, eps)
 
-            j_plus, _ = eval_J(rp_plus)
-            j_minus, _ = eval_J(rp_minus)
-            g = (j_plus - j_minus) / (2.0 * eps)
-            grads[p] = float(g)
+        # Backtracking line search: shrink lr until we find an improving step.
+        max_backtracks = 12
+        lr_try = float(lr)
+        accepted = False
+        new_J = float("inf")
+        new_breakdown: Dict[str, float] = {}
 
-        # Propose update
-        proposal = copy.deepcopy(raw_params)
-        for p in config.OPT_PARAM_PATHS:
-            x = _get_by_path(raw_params, p)
-            x_new = x - lr * grads[p]
-            _set_by_path(proposal, p, _apply_bounds(p, x_new))
+        for bt in range(max_backtracks + 1):
+            proposal = copy.deepcopy(raw_params)
+            for p in config.OPT_PARAM_PATHS:
+                x = _get_by_path(raw_params, p)
+                x_new = x - lr_try * grads[p]
+                _set_by_path(proposal, p, _apply_bounds(p, x_new))
 
-        new_J, new_breakdown = eval_J(proposal)
-
-        # Simple backtracking if worse
-        if new_J > cur_J:
-            lr *= 0.5
-            if config.VERBOSE:
-                print(f"iter={it}: J {cur_J:.6g} -> {new_J:.6g} (worse), lr -> {lr:.6g}")
-            if lr < 1e-9:
+            new_J, new_breakdown = eval_J(proposal)
+            if new_J <= cur_J:
+                accepted = True
                 break
-        else:
+            lr_try *= 0.5
+
+        if not accepted:
             if config.VERBOSE:
-                print(f"iter={it}: J {cur_J:.6g} -> {new_J:.6g} (improved)")
-            raw_params = proposal
+                print(
+                    f"iter={it}: no improving step found after {max_backtracks} backtracks; stopping (lr={lr_try:.6g})"
+                )
+            break
 
-            # Update best immediately on acceptance (important when OPT_MAX_ITERS is small).
-            if new_J < best_J:
-                best_J = float(new_J)
-                best_params = copy.deepcopy(raw_params)
-                best_breakdown = dict(new_breakdown)
+        if config.VERBOSE:
+            suffix = f" (backtracks={bt})" if bt else ""
+            print(f"iter={it}: J {cur_J:.6g} -> {new_J:.6g} (improved), lr={lr_try:.6g}{suffix}")
 
-            lr *= float(config.OPT_LEARNING_RATE_DECAY)
+        raw_params = proposal
 
-            rel_impr = (cur_J - new_J) / max(1e-12, abs(cur_J))
-            if rel_impr < float(config.OPT_TOL_REL):
-                if config.VERBOSE:
-                    print(f"Stopping: relative improvement {rel_impr:.3g} < OPT_TOL_REL")
-                break
+        # Update best immediately on acceptance (important when OPT_MAX_ITERS is small).
+        if new_J < best_J:
+            best_J = float(new_J)
+            best_params = copy.deepcopy(raw_params)
+            best_breakdown = dict(new_breakdown)
+
+        # Update learning rate after a successful step.
+        lr = lr_try * float(config.OPT_LEARNING_RATE_DECAY)
+
+        rel_impr = (cur_J - new_J) / max(1e-12, abs(cur_J))
+        if rel_impr < float(config.OPT_TOL_REL):
+            if config.VERBOSE:
+                print(f"Stopping: relative improvement {rel_impr:.3g} < OPT_TOL_REL")
+            break
 
     # Write outputs
     hist_df = pd.DataFrame(history_rows)

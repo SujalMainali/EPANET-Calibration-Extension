@@ -6,7 +6,7 @@ These are examples/placeholders you should edit to match your network.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Iterable, Optional, Tuple
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -109,6 +109,7 @@ def build_service_nodes_from_inp(
     sensor_nodes: Iterable[str],
     houseend_prefix: str = "HOUSEEND_",
     zone_by_node: Optional[Dict[str, str]] = None,
+    ignore_unmapped_zones: bool = False,
 ) -> Tuple[ModelMetadata, Dict[str, object]]:
     """Build ModelMetadata.service_nodes by reading the INP.
 
@@ -129,6 +130,8 @@ def build_service_nodes_from_inp(
     service_nodes: Dict[str, ServiceNodeMeta] = {}
     for _, r in df.iterrows():
         node_name = str(r["node_name"])
+        if ignore_unmapped_zones and zone_by_node and (node_name not in zone_by_node):
+            continue
         zone = zone_by_node.get(node_name, "UNKNOWN")
         family = str(r.get("pattern_name") or "DEFAULT")
         service_nodes[node_name] = ServiceNodeMeta(
@@ -150,6 +153,45 @@ def build_service_nodes_from_inp(
         }
     )
     return metadata, info
+
+
+def validate_nodes_exist_in_inp(inp_path: str, node_names: Iterable[str]) -> list[str]:
+    wn = wntr.network.WaterNetworkModel(str(Path(inp_path)))
+    node_set = set(str(n) for n in wn.node_name_list)
+    missing = [str(n) for n in node_names if str(n) not in node_set]
+    return missing
+
+
+def build_leak_nodes_from_ids(
+    inp_path: str,
+    leak_node_ids: Iterable[str],
+    *,
+    zone_by_node: Optional[Dict[str, str]] = None,
+    default_zone: str = "UNKNOWN",
+    default_weight: float = 1.0,
+) -> Dict[str, LeakNodeMeta]:
+    """Build metadata.leak_nodes from an explicit list of node IDs.
+
+    These nodes are where emitters will be applied in the toolkit run.
+    """
+
+    leak_node_ids = [str(x) for x in leak_node_ids]
+    if not leak_node_ids:
+        return {}
+
+    missing = validate_nodes_exist_in_inp(inp_path, leak_node_ids)
+    if missing:
+        raise ValueError(f"Leak node IDs not found in INP: {missing[:10]}{'...' if len(missing) > 10 else ''}")
+
+    zone_by_node = zone_by_node or {}
+    out: Dict[str, LeakNodeMeta] = {}
+    for nid in leak_node_ids:
+        out[nid] = LeakNodeMeta(
+            node_name=nid,
+            zone=str(zone_by_node.get(nid, default_zone)),
+            weight=float(default_weight),
+        )
+    return out
 
 
 def load_zone_mapping_csv(path: str) -> Dict[str, str]:
@@ -183,6 +225,7 @@ def build_zone_mapping_from_inp(
     mode: str = "grid",
     node_prefix: str | None = None,
     zone_labels: tuple[str, str, str, str] = ("Z_NW", "Z_NE", "Z_SW", "Z_SE"),
+    circular_specs: Optional[Iterable[Dict[str, Any]]] = None,
 ) -> Dict[str, str]:
     """Build a node->zone mapping using coordinates embedded in the INP.
 
@@ -197,8 +240,9 @@ def build_zone_mapping_from_inp(
     - Nodes missing coordinates are skipped.
     """
 
-    if mode != "grid":
-        raise ValueError("mode must be 'grid'")
+    mode = str(mode).strip().lower()
+    if mode not in {"grid", "circular"}:
+        raise ValueError("mode must be 'grid' or 'circular'")
 
     wn = wntr.network.WaterNetworkModel(str(Path(inp_path)))
 
@@ -225,6 +269,47 @@ def build_zone_mapping_from_inp(
 
     if not coords:
         return {}
+
+    if mode == "circular":
+        if not circular_specs:
+            raise ValueError("circular_specs is required when mode='circular'")
+
+        specs = []
+        for s in circular_specs:
+            if not isinstance(s, dict):
+                raise ValueError("Each circular_specs entry must be a dict")
+            zone = str(s.get("zone") or s.get("name") or "").strip()
+            center = str(s.get("center_node") or s.get("center") or "").strip()
+            radius: Any = s.get("radius")
+            if not zone or not center or radius is None:
+                raise ValueError(
+                    "Each circular_specs entry must include keys: zone, center_node, radius"
+                )
+            r = float(radius)
+            if r <= 0:
+                raise ValueError(f"Radius must be > 0 for zone {zone!r}")
+            if center not in coords:
+                raise ValueError(
+                    f"Center node {center!r} missing coordinates or excluded by node_prefix={node_prefix!r}"
+                )
+            cx, cy = coords[center]
+            specs.append((zone, center, cx, cy, r))
+
+        out: Dict[str, str] = {}
+        for name, (x, y) in coords.items():
+            best_zone = None
+            best_d2 = None
+            for zone, _center, cx, cy, r in specs:
+                dx = x - cx
+                dy = y - cy
+                d2 = dx * dx + dy * dy
+                if d2 <= r * r:
+                    if best_d2 is None or d2 < best_d2:
+                        best_d2 = d2
+                        best_zone = zone
+            if best_zone is not None:
+                out[name] = str(best_zone)
+        return out
 
     xs = np.asarray([v[0] for v in coords.values()], dtype=float)
     ys = np.asarray([v[1] for v in coords.values()], dtype=float)
@@ -294,7 +379,8 @@ def build_example_raw_params() -> dict:
             "max_carryover_multiplier": 2.0,
         },
         "leakage": {
-            "zone_multipliers": {},
+                "global_scale": 0.0,
+            "zone_multipliers": {"Z1": 1.0, "Z2": 1.3},
             "emitter_exponent": 1.0,
         },
         "demand": {

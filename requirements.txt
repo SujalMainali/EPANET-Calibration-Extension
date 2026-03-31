@@ -2,3 +2,4 @@
 wntr
 numpy
 pandas
+matplotlib

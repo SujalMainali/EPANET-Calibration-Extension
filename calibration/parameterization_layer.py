@@ -51,6 +51,7 @@ class ParameterizationLayer:
 
         lk = raw.get("leakage", {})
         params.leakage = ZoneLeakageSettings(
+            global_scale=float(lk.get("global_scale", 0.0)),
             zone_multipliers={str(k): float(v) for k, v in lk.get("zone_multipliers", {}).items()},
             emitter_exponent=None
             if lk.get("emitter_exponent") is None
@@ -88,6 +89,8 @@ class ParameterizationLayer:
             raise ValueError("required_pressure must be greater than minimum_pressure")
         if params.pda.pressure_exponent <= 0:
             raise ValueError("pressure_exponent must be > 0")
+        if params.leakage.global_scale < 0:
+            raise ValueError("leakage.global_scale must be >= 0")
         if params.pattern_family.morning_width <= 0 or params.pattern_family.evening_width <= 0:
             raise ValueError("pattern widths must be > 0")
         if params.demand.demand_multiplier <= 0:

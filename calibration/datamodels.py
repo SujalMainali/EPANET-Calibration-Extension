@@ -38,6 +38,9 @@ class CarryoverSettings:
 
 @dataclass
 class ZoneLeakageSettings:
+    # Global scaling applied to all emitter coefficients. Keep at 0.0 to effectively disable
+    # emitters even if leak nodes are present.
+    global_scale: float = 0.0
     zone_multipliers: Dict[str, float] = field(default_factory=dict)
     emitter_exponent: Optional[float] = 0.5
 
