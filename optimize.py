@@ -20,6 +20,7 @@ Implementation notes
 
 from __future__ import annotations
 
+import argparse
 import copy
 import json
 from pathlib import Path
@@ -38,6 +39,49 @@ def _ensure_dirs() -> None:
     config.RUNS_DIR.mkdir(parents=True, exist_ok=True)
     config.DEBUG_DIR.mkdir(parents=True, exist_ok=True)
     config.REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _next_run_no(base_runs_dir: Path) -> int:
+    """Return next available integer N for outputs/runs/run_N."""
+
+    if not base_runs_dir.exists():
+        return 1
+    best = 0
+    for p in base_runs_dir.iterdir():
+        if not p.is_dir():
+            continue
+        name = p.name
+        if not name.startswith("run_"):
+            continue
+        suffix = name[len("run_") :]
+        try:
+            n = int(suffix)
+        except Exception:
+            continue
+        best = max(best, n)
+    return best + 1
+
+
+def _prepare_run_dir(run_no: int | None) -> Path:
+    """Create and return a per-optimizer-run directory under outputs/runs/."""
+
+    base = Path(config.RUNS_DIR)
+    base.mkdir(parents=True, exist_ok=True)
+
+    if run_no is None:
+        run_no = _next_run_no(base)
+
+    if run_no <= 0:
+        raise ValueError("--run-no must be a positive integer")
+
+    run_dir = base / f"run_{int(run_no)}"
+    if run_dir.exists():
+        raise FileExistsError(
+            f"Run directory already exists: {run_dir}. "
+            "Pass a different --run-no or omit it to auto-increment."
+        )
+    run_dir.mkdir(parents=True, exist_ok=False)
+    return run_dir
 
 
 def _coerce_index_to_seconds(df: pd.DataFrame) -> pd.DataFrame:
@@ -174,7 +218,17 @@ def _finite_difference_grad(
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Calibrate parameters via gradient descent")
+    parser.add_argument(
+        "--run-no",
+        type=int,
+        default=None,
+        help="If set, write this optimize invocation into outputs/runs/run_<N>/ (otherwise auto-increment)",
+    )
+    args = parser.parse_args()
+
     _ensure_dirs()
+    run_dir = _prepare_run_dir(args.run_no)
 
     observed, n_days = load_observed_multi_day()
 
@@ -215,6 +269,7 @@ def main() -> None:
     history_rows = []
 
     if config.VERBOSE:
+        print(f"Optimizer run dir: {run_dir}")
         print(f"Observed days: {n_days}, rows: {len(observed)}")
         print("Initial J_total:", best_J)
 
@@ -293,7 +348,10 @@ def main() -> None:
 
     # Write outputs
     hist_df = pd.DataFrame(history_rows)
-    hist_df.to_csv(Path(config.OPT_HISTORY_CSV), index=False)
+    # Per-run copies (do not overwrite previous optimizer invocations)
+    run_hist_csv = run_dir / "opt_history.csv"
+    run_best_json = run_dir / "best_params.json"
+    hist_df.to_csv(run_hist_csv, index=False)
 
     out = {
         "best_J_total": float(best_J),
@@ -302,12 +360,20 @@ def main() -> None:
         "optimized_paths": list(config.OPT_PARAM_PATHS),
         "n_days": int(n_days),
     }
+    run_best_json.write_text(json.dumps(out, indent=2, default=str))
+
+    # Also update the legacy "latest" outputs for convenience (these may be overwritten each run).
+    Path(config.OPT_HISTORY_CSV).parent.mkdir(parents=True, exist_ok=True)
+    Path(config.OPT_BEST_PARAMS_JSON).parent.mkdir(parents=True, exist_ok=True)
+    hist_df.to_csv(Path(config.OPT_HISTORY_CSV), index=False)
     Path(config.OPT_BEST_PARAMS_JSON).write_text(json.dumps(out, indent=2, default=str))
 
     if config.VERBOSE:
         print("Best J_total:", float(best_J))
-        print(f"Wrote: {config.OPT_HISTORY_CSV}")
-        print(f"Wrote: {config.OPT_BEST_PARAMS_JSON}")
+        print(f"Wrote (per-run): {run_hist_csv}")
+        print(f"Wrote (per-run): {run_best_json}")
+        print(f"Wrote (latest): {config.OPT_HISTORY_CSV}")
+        print(f"Wrote (latest): {config.OPT_BEST_PARAMS_JSON}")
 
 
 if __name__ == "__main__":

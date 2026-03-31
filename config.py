@@ -128,6 +128,18 @@ OPT_PARAM_PATHS: list[str] = [
     "pda.required_pressure",
     "pda.minimum_pressure",
     "pda.pressure_exponent",
+    # Global 24-hour demand pattern shape parameters (applies to all service nodes).
+    # These control *when* demand happens (centers), how spread it is (widths), and
+    # relative peak strengths (weights). Total daily demand is still controlled by
+    # demand.demand_multiplier because the pattern is normalized to sum to 24.
+    "pattern_family.morning_center",
+    "pattern_family.morning_width",
+    "pattern_family.morning_weight",
+    "pattern_family.evening_center",
+    "pattern_family.evening_width",
+    "pattern_family.evening_weight",
+    "pattern_family.background_weight",
+    "pattern_family.floor",
     "leakage.global_scale",
     "leakage.emitter_exponent",
 ]
@@ -153,6 +165,20 @@ OPT_BOUNDS: dict[str, tuple[float, float]] = {
     # Guard rails for parameters that must stay non-negative / positive to satisfy
     # validation in calibration/parameterization_layer.py.
     "demand.demand_multiplier": (1e-6, 10.0),
+
+    # Demand pattern family bounds (see calibration/datamodels.py: PatternFamilyParams).
+    # Centers are hours in [0, 23]. Widths are in hours and must be > 0.
+    # Weights and floor are kept non-negative to avoid negative hourly demands.
+    "pattern_family.morning_center": (0.0, 23.0),
+    "pattern_family.evening_center": (0.0, 23.0),
+    "pattern_family.morning_width": (0.05, 8.0),
+    "pattern_family.evening_width": (0.05, 8.0),
+    "pattern_family.morning_weight": (0.0, 5.0),
+    "pattern_family.evening_weight": (0.0, 5.0),
+    "pattern_family.background_weight": (0.0, 5.0),
+    # Keep a tiny floor so the pattern sum stays positive even if all weights drift to 0.
+    "pattern_family.floor": (0.0, 2.0),
+
     # Exponents close to zero can lead to numerical issues.
     "pda.pressure_exponent": (0.05, 5.0),
     "leakage.global_scale": (0.0, 50.0),
