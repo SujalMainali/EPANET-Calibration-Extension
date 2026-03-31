@@ -42,7 +42,7 @@ def main() -> None:
         print("Unmet-demand state:")
         print(smoke_df.attrs.get("unmet_daily_m3", {}))
 
-    if RUN_EMITTER_CHECK:
+    if RUN_EMITTER_CHECK and metadata.leak_nodes and metadata.leak_check_node:
         off = config.build_default_raw_params()
         off["leakage"]["zone_multipliers"] = {"Z1": 0.0, "Z2": 0.0}
 
@@ -60,6 +60,9 @@ def main() -> None:
             )
         print("=== EMITTER VERIFICATION (OFF vs STRONG ON) ===")
         print(emitter_df.head().to_string(index=False))
+    elif RUN_EMITTER_CHECK:
+        print("=== EMITTER VERIFICATION SKIPPED ===")
+        print("No leak nodes / leak_check_node configured in metadata.")
 
     if RUN_PDA_CHECK:
         low = config.build_default_raw_params()

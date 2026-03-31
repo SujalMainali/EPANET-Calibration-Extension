@@ -99,6 +99,44 @@ class HydraulicModelLayerENepanet:
         behavior: BehaviorLayer,
         params: ModelParameters,
     ) -> Dict[str, object]:
+        def flow_to_m3s_factor(inp_units: str | None) -> float:
+            """Return multiplier to convert EPANET flow/demand units -> m^3/s.
+
+            EPANET returns demand in the project's flow units (same family as INP units).
+            WNTR stores demands internally as m^3/s, but toolkit values must be converted.
+            """
+
+            if not inp_units:
+                return 1.0
+            u = str(inp_units).strip().upper()
+
+            # Metric
+            if u == "CMS":  # m^3/s
+                return 1.0
+            if u == "CMD":  # m^3/day
+                return 1.0 / 86400.0
+            if u == "MLD":  # megaliters/day = 1000 m^3/day
+                return 1000.0 / 86400.0
+            if u == "LPS":  # liters/second
+                return 1.0 / 1000.0
+            if u == "LPM":  # liters/minute
+                return 1.0 / (1000.0 * 60.0)
+
+            # US/Imperial
+            if u == "CFS":  # cubic feet/second
+                return 0.028316846592
+            if u == "GPM":  # gallons/minute (US)
+                return 0.003785411784 / 60.0
+            if u == "MGD":  # million gallons/day (US)
+                return (1_000_000.0 * 0.003785411784) / 86400.0
+            if u == "IMGD":  # million imperial gallons/day
+                return (1_000_000.0 * 0.00454609) / 86400.0
+            if u == "AFD":  # acre-feet/day
+                return 1233.48183754752 / 86400.0
+
+            # Unknown: assume already m^3/s
+            return 1.0
+
         inp_tmp, rpt_tmp, out_tmp = self.write_temp_inp(wn_model)
 
         en = ENepanet()
@@ -148,6 +186,10 @@ class HydraulicModelLayerENepanet:
             en.ENopenH()
             en.ENinitH(0)
 
+            # Convert toolkit-reported demand (flow units) to m^3/s for downstream use.
+            inp_units = getattr(wn_model.options.hydraulic, "inpfile_units", None)
+            demand_to_m3s = flow_to_m3s_factor(inp_units)
+
             pressure_rows = []
             demand_rows = []
             times_s = []
@@ -165,7 +207,8 @@ class HydraulicModelLayerENepanet:
                     prow[n] = safe_float(call_en_get(en, "ENgetnodevalue", idx, C_PRESSURE))
                     if C_DEMAND is not None:
                         try:
-                            drow[n] = safe_float(call_en_get(en, "ENgetnodevalue", idx, C_DEMAND))
+                            dval = safe_float(call_en_get(en, "ENgetnodevalue", idx, C_DEMAND))
+                            drow[n] = float(dval) * float(demand_to_m3s)
                         except Exception:
                             drow[n] = np.nan
 
@@ -251,6 +294,10 @@ class HydraulicModelLayerENepanet:
                     "damplimit": wn_model.options.hydraulic.damplimit,
                     "checkfreq": wn_model.options.hydraulic.checkfreq,
                     "maxcheck": wn_model.options.hydraulic.maxcheck,
+                },
+                "demand_units": {
+                    "inpfile_units": str(inp_units),
+                    "toolkit_demand_to_m3s_factor": float(demand_to_m3s),
                 },
                 "expected_time_index": expected_times,
                 "actual_time_index": times_s,
