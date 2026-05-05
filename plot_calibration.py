@@ -187,42 +187,51 @@ def main() -> None:
     # Lazy import so the rest of the repo can run without matplotlib.
     try:
         import matplotlib.pyplot as plt
+        from matplotlib.ticker import MultipleLocator
     except Exception as e:
         raise RuntimeError(
             "matplotlib is required for plotting. Install it with: pip install matplotlib"
         ) from e
 
+    def _format_axes(ax) -> None:
+        # Requested: tick marks every hour (x) and every 1 m (y).
+        ax.xaxis.set_major_locator(MultipleLocator(2.0))
+        ax.yaxis.set_major_locator(MultipleLocator(1.0))
+        ax.tick_params(axis="both", labelsize=8)
+
     # Per-sensor plots
     for s in sensors:
-        fig = plt.figure(figsize=(10, 4))
         t = _hours(obs_aligned.index.to_numpy())
-        plt.plot(t, obs_aligned[s].to_numpy(dtype=float), "o-", label="Observed", linewidth=1.5, markersize=3)
-        plt.plot(t, sim_aligned[s].to_numpy(dtype=float), "-", label="Simulated", linewidth=2.0)
-        plt.title(f"Sensor {s}: Observed vs Simulated")
-        plt.xlabel("Time (hours since start)")
-        plt.ylabel("Pressure")
-        plt.grid(True, alpha=0.3)
-        plt.legend()
+        fig, ax = plt.subplots(figsize=(10, 4))
+        ax.plot(t, obs_aligned[s].to_numpy(dtype=float), "o-", label="Observed", linewidth=1.5, markersize=3)
+        ax.plot(t, sim_aligned[s].to_numpy(dtype=float), "-", label="Simulated", linewidth=2.0)
+        ax.set_title(f"Sensor {s}: Observed vs Simulated")
+        ax.set_xlabel("Time (hours since start)")
+        ax.set_ylabel("Pressure")
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        _format_axes(ax)
         out = plot_dir / f"{s}.png"
         fig.tight_layout()
-        fig.savefig(out, dpi=150)
+        fig.savefig(out, dpi=220)
         plt.close(fig)
 
     # Combined overlay plot (subset)
     max_sensors = int(max(1, args.max_sensors))
     sel = sensors[:max_sensors]
-    fig = plt.figure(figsize=(12, 6))
+    fig, ax = plt.subplots(figsize=(12, 6))
     t = _hours(obs_aligned.index.to_numpy())
     for s in sel:
-        plt.plot(t, obs_aligned[s].to_numpy(dtype=float), "--", linewidth=1.0, alpha=0.9)
-        plt.plot(t, sim_aligned[s].to_numpy(dtype=float), "-", linewidth=1.5, alpha=0.9)
-    plt.title(f"Observed (dashed) vs Simulated (solid) for {len(sel)} sensors")
-    plt.xlabel("Time (hours since start)")
-    plt.ylabel("Pressure")
-    plt.grid(True, alpha=0.3)
+        ax.plot(t, obs_aligned[s].to_numpy(dtype=float), "--", linewidth=1.0, alpha=0.9)
+        ax.plot(t, sim_aligned[s].to_numpy(dtype=float), "-", linewidth=1.5, alpha=0.9)
+    ax.set_title(f"Observed (dashed) vs Simulated (solid) for {len(sel)} sensors")
+    ax.set_xlabel("Time (hours since start)")
+    ax.set_ylabel("Pressure")
+    ax.grid(True, alpha=0.3)
+    _format_axes(ax)
     out = plot_dir / "sensors_overlay.png"
     fig.tight_layout()
-    fig.savefig(out, dpi=150)
+    fig.savefig(out, dpi=220)
     plt.close(fig)
 
     if config.VERBOSE:

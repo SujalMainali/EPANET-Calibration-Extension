@@ -75,6 +75,19 @@ class BehaviorLayer:
             dtype=float,
         )
         late_weights /= late_weights.sum()
+
+        # Multi-day runs repeat the 24h pattern; ensure carryover shaping matches
+        # the full horizon length (e.g., 4 days -> 96 hourly steps).
+        if preferred_hourly.size != late_weights.size:
+            if preferred_hourly.size % 24 != 0:
+                raise ValueError(
+                    f"Unexpected preferred_hourly length {preferred_hourly.size}; expected multiple of 24."
+                )
+            n = int(preferred_hourly.size // 24)
+            late_weights = np.tile(late_weights, n)
+            # Keep total added volume equal to `extra` (not `extra * n`).
+            late_weights = late_weights / late_weights.sum()
+
         return preferred_hourly + extra * late_weights
 
     def grouped_emitter_coefficients(self, params: ModelParameters) -> Dict[str, float]:

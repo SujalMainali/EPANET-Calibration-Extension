@@ -40,7 +40,7 @@ OBSERVED_PRESSURE_CSV: str | None = None
 # Optional: provide multiple observed CSVs (e.g., one per day). If set, this list is used
 # and OBSERVED_PRESSURE_CSV is ignored. Each CSV can have its own time column, but the
 # column name must be the same across files if you set OBSERVED_TIME_COLUMN.
-OBSERVED_PRESSURE_CSVS: list[str] | None = ["Data/HourlyData_2025-12-18.csv", "Data/HourlyData_2025-12-19.csv", "Data/HourlyData_2025-12-20.csv", "Data/HourlyData_2025-12-21.csv"]
+OBSERVED_PRESSURE_CSVS: list[str] | None = ["Data/HourlyData_2025-12-18.csv", "Data/HourlyData_2025-12-19.csv", "Data/HourlyData_2025-12-20.csv"]
 
 # Optional: if your observed CSV's time column is NOT the first column, set it here.
 # If None, the loader assumes the first column is the time column.
@@ -120,8 +120,8 @@ VERBOSE = True
 #   J = w_ts*J_timeseries + w_feat*J_features + w_sp*J_spatial + w_vol*J_volume + w_reg*J_regularization
 # Used by optimize.py (and compare.py).
 OBJECTIVE_WEIGHTS: dict[str, float] = {
-    "w_ts": 0.40,
-    "w_feat": 0.30,
+    "w_ts": 0.25,
+    "w_feat": 0.35,
     "w_sp": 0.15,
     "w_vol": 0.10,
     "w_reg": 0.05,
@@ -158,6 +158,7 @@ OPT_PARAM_PATHS: list[str] = [
     "pattern_family.floor",
     "leakage.global_scale",
     "leakage.emitter_exponent",
+    "zone_multipliers.Z_A",
 ]
 
 # Add zone leakage multipliers to the optimization set (one parameter per zone).
