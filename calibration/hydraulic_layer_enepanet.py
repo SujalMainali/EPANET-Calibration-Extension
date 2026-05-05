@@ -6,7 +6,7 @@ import copy
 import tempfile
 import warnings
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Iterable, Tuple
 
 import numpy as np
 import pandas as pd
@@ -98,6 +98,12 @@ class HydraulicModelLayerENepanet:
         metadata: ModelMetadata,
         behavior: BehaviorLayer,
         params: ModelParameters,
+        *,
+        nodes_to_read: "Iterable[str] | None" = None,
+        emitter_overrides: "Dict[str, float] | None" = None,
+        emitter_override_mode: str = "add",
+        emitter_window_overrides: "Dict[str, Tuple[int, int, float]] | None" = None,
+        emitter_window_override_mode: str = "add",
     ) -> Dict[str, object]:
         def flow_to_m3s_factor(inp_units: str | None) -> float:
             """Return multiplier to convert EPANET flow/demand units -> m^3/s.
@@ -136,6 +142,11 @@ class HydraulicModelLayerENepanet:
 
             # Unknown: assume already m^3/s
             return 1.0
+
+        if emitter_override_mode not in {"add", "set"}:
+            raise ValueError("emitter_override_mode must be one of {'add','set'}")
+        if emitter_window_override_mode not in {"add", "set"}:
+            raise ValueError("emitter_window_override_mode must be one of {'add','set'}")
 
         inp_tmp, rpt_tmp, out_tmp = self.write_temp_inp(wn_model)
 
@@ -178,20 +189,74 @@ class HydraulicModelLayerENepanet:
                 except Exception:
                     pass
 
-            nodes_to_read = sorted(
-                set(metadata.sensor_nodes)
-                | set(metadata.service_nodes.keys())
-                | set(metadata.leak_nodes.keys())
-            )
-            node_index = {n: call_en_get(en, "ENgetnodeindex", n) for n in nodes_to_read}
+            # Default: read sensors + all service nodes + configured leak nodes.
+            if nodes_to_read is None:
+                nodes_set = (
+                    set(metadata.sensor_nodes)
+                    | set(metadata.service_nodes.keys())
+                    | set(metadata.leak_nodes.keys())
+                )
+            else:
+                nodes_set = set(str(x) for x in nodes_to_read)
 
             emitter_coeffs = behavior.grouped_emitter_coefficients(params)
-            for node_name, coeff in emitter_coeffs.items():
+            if emitter_overrides:
+                for node_name, coeff in emitter_overrides.items():
+                    n = str(node_name)
+                    c = float(coeff)
+                    if emitter_override_mode == "add":
+                        emitter_coeffs[n] = float(emitter_coeffs.get(n, 0.0)) + c
+                    else:
+                        emitter_coeffs[n] = c
+
+            # Base/static emitters (baseline + any always-on overrides).
+            base_emitter_coeffs = dict(emitter_coeffs)
+
+            if emitter_window_overrides:
+                for node_name, win in emitter_window_overrides.items():
+                    n = str(node_name)
+                    if not isinstance(win, tuple) or len(win) != 3:
+                        raise ValueError("emitter_window_overrides values must be (start_s, end_s, coeff)")
+                    start_s, end_s, c = int(win[0]), int(win[1]), float(win[2])
+                    if end_s < start_s:
+                        raise ValueError(f"Invalid window for {n!r}: end_s < start_s")
+                    # Ensure node exists in base emitter dict for reversion.
+                    base_emitter_coeffs.setdefault(n, 0.0)
+
+            # Ensure any node we want to apply an emitter to is present.
+            nodes_set |= set(base_emitter_coeffs.keys())
+            if emitter_window_overrides:
+                nodes_set |= set(str(k) for k in emitter_window_overrides.keys())
+
+            nodes_to_read = sorted(nodes_set)
+            node_index = {n: call_en_get(en, "ENgetnodeindex", n) for n in nodes_to_read}
+
+            for node_name, coeff in base_emitter_coeffs.items():
                 idx = node_index[node_name]
                 en.ENsetnodevalue(idx, C_EMITTER, float(coeff))
 
             en.ENopenH()
             en.ENinitH(0)
+
+            def _apply_window_emitters(target_time_s: int) -> None:
+                if not emitter_window_overrides:
+                    return
+                for node_name, (start_s, end_s, win_coeff) in emitter_window_overrides.items():
+                    n = str(node_name)
+                    base = float(base_emitter_coeffs.get(n, 0.0))
+                    active = int(start_s) <= int(target_time_s) < int(end_s)
+                    if active:
+                        if emitter_window_override_mode == "add":
+                            val = base + float(win_coeff)
+                        else:
+                            val = float(win_coeff)
+                    else:
+                        val = base
+                    idx = node_index[n]
+                    en.ENsetnodevalue(idx, C_EMITTER, float(val))
+
+            # Ensure emitters are correct for time=0 before the first ENrunH.
+            _apply_window_emitters(0)
 
             # Convert toolkit-reported demand (flow units) to m^3/s for downstream use.
             inp_units = getattr(wn_model.options.hydraulic, "inpfile_units", None)
@@ -227,6 +292,9 @@ class HydraulicModelLayerENepanet:
                 next_steps.append(tstep)
                 if tstep <= 0:
                     break
+
+                # Prepare emitters for the next hydraulic solve time.
+                _apply_window_emitters(int(t + tstep))
 
             en.ENcloseH()
 
@@ -300,7 +368,14 @@ class HydraulicModelLayerENepanet:
                 "temp_inp": str(inp_tmp),
                 "temp_rpt": str(rpt_tmp),
                 "temp_out": str(out_tmp),
-                "emitter_coeffs": emitter_coeffs,
+                "emitter_coeffs": base_emitter_coeffs,
+                "emitter_overrides": None if not emitter_overrides else {str(k): float(v) for k, v in emitter_overrides.items()},
+                "emitter_override_mode": str(emitter_override_mode),
+                "emitter_window_overrides": None
+                if not emitter_window_overrides
+                else {str(k): (int(v[0]), int(v[1]), float(v[2])) for k, v in emitter_window_overrides.items()},
+                "emitter_window_override_mode": str(emitter_window_override_mode),
+                "nodes_to_read": nodes_to_read,
                 "pda_settings_written_to_inp": {
                     "demand_model": wn_model.options.hydraulic.demand_model,
                     "minimum_pressure": wn_model.options.hydraulic.minimum_pressure,

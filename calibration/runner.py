@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Dict, Tuple, TypedDict, cast
+from typing import TYPE_CHECKING, Any, Dict, Iterable, Tuple, TypedDict, cast
 
 import pandas as pd
 
@@ -35,12 +35,34 @@ class LayeredModelRunner:
         self.behavior = behavior
         self.metadata = metadata
 
-    def build_and_run_once(self, raw_params: dict) -> Tuple["object", RunResults, ModelParameters]:
+    def build_and_run_once(
+        self,
+        raw_params: dict,
+        *,
+        nodes_to_read: "Iterable[str] | None" = None,
+        emitter_overrides: "dict[str, float] | None" = None,
+        emitter_override_mode: str = "add",
+        emitter_window_overrides: "dict[str, tuple[int, int, float]] | None" = None,
+        emitter_window_override_mode: str = "add",
+    ) -> Tuple["object", RunResults, ModelParameters]:
         params = self.parameterization.from_dict(raw_params)
         wn_model = self.hydraulic.clone_network()
         self.hydraulic.apply_pda_settings_to_inp_model(wn_model, params)
         self.hydraulic.apply_service_node_demands(wn_model, self.metadata, self.behavior, params)
-        results = cast(RunResults, self.hydraulic.run(wn_model, self.metadata, self.behavior, params))
+        results = cast(
+            RunResults,
+            self.hydraulic.run(
+                wn_model,
+                self.metadata,
+                self.behavior,
+                params,
+                nodes_to_read=nodes_to_read,
+                emitter_overrides=emitter_overrides,
+                emitter_override_mode=emitter_override_mode,
+                emitter_window_overrides=emitter_window_overrides,
+                emitter_window_override_mode=emitter_window_override_mode,
+            ),
+        )
         return wn_model, results, params
 
     def smoke_test(self, raw_params: dict) -> pd.DataFrame:
