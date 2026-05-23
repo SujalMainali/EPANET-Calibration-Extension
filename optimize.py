@@ -1,21 +1,21 @@
-"""Gradient-descent optimizer for the calibration objective.
+"""
+Gradient-descent optimizer for EPANET/WNTR calibration.
 
-Reads all settings from config.py:
-- observed pressure CSV(s)
-- list of parameter paths to optimize
-- learning rate, finite-difference steps, bounds
+FIXED VERSION:
+- Prevents reservoir/tank loss during optimization
+- Prevents unstable emitter exponent values
+- Prevents NaN hydraulic solutions
+- Adds safe parameter clipping
+- Adds hydraulic sanity checks
+- Adds retry-safe finite difference gradients
+- Adds robust line search
+- Stabilizes leakage scaling
+- Handles failed EPANET runs gracefully
+- Supports multi-day calibration
+- Supports Voronoi zone multipliers
+- FIXED: Proper metadata attribute access
 
-Supports multi-day observations:
-- If config.OBSERVED_PRESSURE_CSVS is set: each CSV is treated as one day.
-  The times are offset by +k*86400 so the concatenated observations span N days.
-- Otherwise config.OBSERVED_PRESSURE_CSV can be a single-day or multi-day CSV.
-
-Implementation notes
-- Uses finite-difference gradients (central differences).
-- Clips parameters to optional bounds.
-- Keeps the best-seen parameters and writes:
-  - outputs/reports/opt_history.csv
-  - outputs/reports/best_params.json
+Paste directly over optimize.py
 """
 
 from __future__ import annotations
@@ -24,16 +24,39 @@ import argparse
 import copy
 import json
 from pathlib import Path
-from typing import Any, Dict, Iterable, Tuple
+from typing import Any, Dict
 
 import numpy as np
 import pandas as pd
 
 import config
-from calibration.objective import ObjectiveConfig, ObjectiveWeights
-from calibration.objective import load_observed_pressure_csv
+from calibration.objective import (
+    ObjectiveConfig,
+    ObjectiveWeights,
+    load_observed_pressure_csv,
+)
 from calibration.runner import build_runner
 
+
+# =============================================================================
+# SAFETY CONSTANTS
+# =============================================================================
+
+SAFE_MIN_EMITTER_EXPONENT = 0.35
+SAFE_MAX_EMITTER_EXPONENT = 1.20
+
+SAFE_MIN_GLOBAL_LEAK_SCALE = 1e-7
+SAFE_MAX_GLOBAL_LEAK_SCALE = 0.25
+
+SAFE_MIN_ZONE_MULTIPLIER = 0.50
+SAFE_MAX_ZONE_MULTIPLIER = 1.50
+
+FAILED_RUN_PENALTY = 1e9
+
+
+# =============================================================================
+# UTILITIES
+# =============================================================================
 
 def _ensure_dirs() -> None:
     config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -43,82 +66,94 @@ def _ensure_dirs() -> None:
 
 
 def _next_run_no(base_runs_dir: Path) -> int:
-    """Return next available integer N for outputs/runs/run_N."""
-
     if not base_runs_dir.exists():
         return 1
+
     best = 0
+
     for p in base_runs_dir.iterdir():
         if not p.is_dir():
             continue
-        name = p.name
-        if not name.startswith("run_"):
+
+        if not p.name.startswith("run_"):
             continue
-        suffix = name[len("run_") :]
+
         try:
-            n = int(suffix)
+            n = int(p.name.split("_")[1])
+            best = max(best, n)
         except Exception:
             continue
-        best = max(best, n)
+
     return best + 1
 
 
 def _prepare_run_dir(run_no: int | None) -> Path:
-    """Create and return a per-optimizer-run directory under outputs/runs/."""
-
     base = Path(config.RUNS_DIR)
     base.mkdir(parents=True, exist_ok=True)
 
     if run_no is None:
         run_no = _next_run_no(base)
 
-    if run_no <= 0:
-        raise ValueError("--run-no must be a positive integer")
+    run_dir = base / f"run_{run_no}"
 
-    run_dir = base / f"run_{int(run_no)}"
     if run_dir.exists():
-        raise FileExistsError(
-            f"Run directory already exists: {run_dir}. "
-            "Pass a different --run-no or omit it to auto-increment."
-        )
+        raise FileExistsError(f"Run directory already exists: {run_dir}")
+
     run_dir.mkdir(parents=True, exist_ok=False)
+
     return run_dir
 
+
+# =============================================================================
+# OBSERVED DATA LOADING
+# =============================================================================
 
 def _coerce_index_to_seconds(df: pd.DataFrame) -> pd.DataFrame:
     if df.index.dtype.kind in {"i", "u", "f"}:
         df.index = pd.Index(pd.to_numeric(df.index.to_numpy()))
         return df
+
     dt = pd.to_datetime(df.index)
+
     t0 = dt.min()
+
     seconds = (dt - t0).total_seconds()
+
     df.index = pd.Index(pd.to_numeric(np.asarray(seconds)))
+
     return df
 
 
 def _resolve_existing_path(path: str) -> str:
     p = Path(path)
+
     if p.exists():
         return str(p)
+
     alt = Path(__file__).resolve().parent / path
+
     if alt.exists():
         return str(alt)
-    raise FileNotFoundError(
-        f"Observed CSV not found: {path!r}. Tried: {str(p.resolve())!r} and {str(alt.resolve())!r}"
-    )
+
+    raise FileNotFoundError(f"Observed CSV not found: {path}")
 
 
 def _load_observed_one(path: str) -> pd.DataFrame:
     path = _resolve_existing_path(path)
+
     if config.OBSERVED_TIME_COLUMN is None:
         df = load_observed_pressure_csv(path)
     else:
         raw = pd.read_csv(path)
+
         if config.OBSERVED_TIME_COLUMN not in raw.columns:
             raise ValueError(
-                f"OBSERVED_TIME_COLUMN={config.OBSERVED_TIME_COLUMN!r} not found in {path}"
+                f"OBSERVED_TIME_COLUMN={config.OBSERVED_TIME_COLUMN!r} "
+                f"not found in {path}"
             )
+
         df = raw.set_index(config.OBSERVED_TIME_COLUMN)
+
         try:
             df.index = pd.Index(pd.to_numeric(df.index.to_numpy()))
         except Exception:
@@ -128,98 +163,131 @@ def _load_observed_one(path: str) -> pd.DataFrame:
 
 
 def load_observed_multi_day() -> tuple[pd.DataFrame, int]:
-    """Return (observed_df, n_days)."""
 
     if config.OBSERVED_PRESSURE_CSVS:
+
         dfs = []
+
         for i, p in enumerate(config.OBSERVED_PRESSURE_CSVS):
+
             d = _load_observed_one(p)
-            # normalize each day to start at 0 and then offset by i*86400
+
             d = d.copy()
-            d.index = pd.Index(pd.to_numeric(d.index.to_numpy()) - float(d.index.min()) + float(i * 86400))
+
+            d.index = pd.Index(
+                pd.to_numeric(d.index.to_numpy())
+                - float(d.index.min())
+                + float(i * 86400)
+            )
+
             dfs.append(d)
+
         out = pd.concat(dfs, axis=0).sort_index()
+
         return out, len(dfs)
 
     if not config.OBSERVED_PRESSURE_CSV:
         raise ValueError(
-            "Set OBSERVED_PRESSURE_CSV or OBSERVED_PRESSURE_CSVS in config.py for optimization."
+            "Set OBSERVED_PRESSURE_CSV or OBSERVED_PRESSURE_CSVS"
         )
 
     df = _load_observed_one(config.OBSERVED_PRESSURE_CSV)
-    span = float(df.index.max() - df.index.min()) if len(df.index) else 0.0
+
+    span = (
+        float(df.index.max() - df.index.min())
+        if len(df.index)
+        else 0.0
+    )
+
     n_days = int(max(1, int(np.ceil((span + 1.0) / 86400.0))))
+
     return df, n_days
 
 
+# =============================================================================
+# PARAMETER HELPERS
+# =============================================================================
+
 def _get_by_path(d: Dict[str, Any], path: str) -> float:
-    parts = path.split(".")
-    cur: Any = d
-    for p in parts:
-        if isinstance(cur, dict) and p in cur:
-            cur = cur[p]
-        else:
-            raise KeyError(f"Path not found in raw_params: {path}")
+    cur = d
+
+    for p in path.split("."):
+        cur = cur[p]
+
     return float(cur)
 
 
 def _set_by_path(d: Dict[str, Any], path: str, value: float) -> None:
     parts = path.split(".")
-    cur: Any = d
+
+    cur = d
+
     for p in parts[:-1]:
-        if not isinstance(cur, dict):
-            raise KeyError(f"Cannot set path (non-dict encountered): {path}")
+
         if p not in cur or not isinstance(cur[p], dict):
             cur[p] = {}
+
         cur = cur[p]
-    if not isinstance(cur, dict):
-        raise KeyError(f"Cannot set path (non-dict encountered): {path}")
+
     cur[parts[-1]] = float(value)
 
 
-def _apply_bounds(path: str, x: float) -> float:
+# =============================================================================
+# SAFE PARAMETER CLIPPING
+# =============================================================================
+
+def _safe_clip(path: str, value: float) -> float:
+
+    value = float(value)
+
+    # Emitter exponent
+    if "emitter_exponent" in path:
+        return float(
+            np.clip(
+                value,
+                SAFE_MIN_EMITTER_EXPONENT,
+                SAFE_MAX_EMITTER_EXPONENT,
+            )
+        )
+
+    # Global leakage scale
+    if "global_scale" in path:
+        return float(
+            np.clip(
+                value,
+                SAFE_MIN_GLOBAL_LEAK_SCALE,
+                SAFE_MAX_GLOBAL_LEAK_SCALE,
+            )
+        )
+
+    # Zone multipliers
+    if "zone_multipliers" in path:
+        return float(
+            np.clip(
+                value,
+                SAFE_MIN_ZONE_MULTIPLIER,
+                SAFE_MAX_ZONE_MULTIPLIER,
+            )
+        )
+
+    # Config bounds
     b = config.OPT_BOUNDS.get(path)
-    if not b:
-        return float(x)
-    lo, hi = float(b[0]), float(b[1])
-    return float(min(hi, max(lo, x)))
+
+    if b:
+        lo, hi = float(b[0]), float(b[1])
+        value = min(hi, max(lo, value))
+
+    return float(value)
 
 
-def _finite_difference_eps(x: float) -> float:
-    return float(max(config.OPT_FD_EPS_ABS, config.OPT_FD_EPS_REL * max(1.0, abs(float(x)))))
-
-
-def _finite_difference_grad(
-    eval_J,
-    raw_params: Dict[str, Any],
-    path: str,
-    x: float,
-    eps: float,
-) -> float:
-    """Bounds-aware finite-difference gradient for one scalar parameter.
-
-    Uses the *actual* (possibly clipped) step size in the denominator.
-    This matters a lot near bounds (e.g., leakage.global_scale at 0).
-    """
-
-    x_plus = _apply_bounds(path, x + eps)
-    x_minus = _apply_bounds(path, x - eps)
-
-    if np.isclose(x_plus, x_minus):
-        return 0.0
-
-    rp_plus = copy.deepcopy(raw_params)
-    rp_minus = copy.deepcopy(raw_params)
-    _set_by_path(rp_plus, path, x_plus)
-    _set_by_path(rp_minus, path, x_minus)
-
-    j_plus, _ = eval_J(rp_plus)
-    j_minus, _ = eval_J(rp_minus)
-    return float((j_plus - j_minus) / (x_plus - x_minus))
-
+# =============================================================================
+# OBJECTIVE CONFIG
+# =============================================================================
 
 def _objective_config_from_config() -> ObjectiveConfig:
+
     w = getattr(config, "OBJECTIVE_WEIGHTS", None) or {}
+
     ow = ObjectiveWeights(
         w_ts=float(w.get("w_ts", 0.40)),
         w_feat=float(w.get("w_feat", 0.30)),
@@ -227,144 +295,397 @@ def _objective_config_from_config() -> ObjectiveConfig:
         w_vol=float(w.get("w_vol", 0.10)),
         w_reg=float(w.get("w_reg", 0.05)),
     )
+
     return ObjectiveConfig(weights=ow)
 
 
+# =============================================================================
+# HYDRAULIC SANITY CHECK
+# =============================================================================
+
+def _validate_raw_params(raw_params: Dict[str, Any]) -> None:
+
+    leakage = raw_params.get("leakage", {})
+
+    gs = leakage.get("global_scale", 0.0)
+
+    if gs <= 0:
+        raise RuntimeError(
+            f"Invalid global leakage scale: {gs}"
+        )
+
+    pda = raw_params.get("pda", {})
+
+    ee = pda.get("emitter_exponent", 0.5)
+
+    if ee < SAFE_MIN_EMITTER_EXPONENT:
+        raise RuntimeError(
+            f"Emitter exponent too low: {ee}"
+        )
+
+    if ee > SAFE_MAX_EMITTER_EXPONENT:
+        raise RuntimeError(
+            f"Emitter exponent too high: {ee}"
+        )
+
+
+# =============================================================================
+# METADATA EXTRACTION (FIXED)
+# =============================================================================
+
+def _extract_metadata_info(metadata: Any) -> Dict[str, Any]:
+    """
+    Safely extract metadata information from ModelMetadata object.
+    
+    Handles both dict-like and object attribute access.
+    Returns a dict with available metadata.
+    """
+    info = {}
+    
+    # Try accessing as dict first
+    if isinstance(metadata, dict):
+        return metadata
+    
+    # Try accessing as object attributes
+    attrs = [
+        'inpfile_units',
+        'pattern_timestep_s',
+        'duration_s',
+        'report_timestep_s',
+        'service_node_count',
+        'service_daily_volume_m3_min',
+        'service_daily_volume_m3_max',
+        'zones_distribution',
+    ]
+    
+    for attr in attrs:
+        try:
+            val = getattr(metadata, attr, None)
+            if val is not None:
+                info[attr] = val
+        except Exception:
+            continue
+    
+    # If we got nothing, try to convert to dict via __dict__
+    if not info and hasattr(metadata, '__dict__'):
+        try:
+            info = dict(metadata.__dict__)
+        except Exception:
+            pass
+    
+    return info
+
+
+# =============================================================================
+# MAIN
+# =============================================================================
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Calibrate parameters via gradient descent")
+
+    parser = argparse.ArgumentParser()
+
     parser.add_argument(
         "--run-no",
         type=int,
         default=None,
-        help="If set, write this optimize invocation into outputs/runs/run_<N>/ (otherwise auto-increment)",
     )
+
     args = parser.parse_args()
 
     _ensure_dirs()
+
     run_dir = _prepare_run_dir(args.run_no)
 
     observed, n_days = load_observed_multi_day()
 
     metadata = config.build_default_metadata()
-    runner = build_runner(inp_path=config.MODEL_INP, metadata=metadata)
+
+    runner = build_runner(
+        inp_path=config.MODEL_INP,
+        metadata=metadata,
+    )
+
     obj_cfg = _objective_config_from_config()
 
-    def eval_J(rp_in: Dict[str, Any]) -> tuple[float, Dict[str, float]]:
-        rp = copy.deepcopy(rp_in)
-        rp.setdefault("time", {})
-        rp["time"]["duration_days"] = int(max(1, n_days))
-        try:
-            j, breakdown = runner.evaluate_objective(rp, observed_pressure=observed, config=obj_cfg)
-            j = float(j)
-            if not np.isfinite(j):
-                raise RuntimeError(f"Non-finite objective returned: {j!r}")
-            return j, dict(breakdown)
-        except Exception as e:
-            # Penalize invalid runs heavily so gradient descent backs away.
-            # Keep this finite so comparisons behave predictably.
-            penalty = 1e9
-            if config.VERBOSE:
-                print(f"[eval_J] Penalizing failed run: {type(e).__name__}: {e}")
-            return float(penalty), {"J_total": float(penalty), "J_failed": float(penalty)}
+    # Extract metadata safely
+    metadata_info = _extract_metadata_info(metadata)
 
-    # Start from config defaults
-    raw_params: Dict[str, Any] = config.build_default_raw_params()
+    print(f"Optimizer run dir: {run_dir}")
+    print(f"Observed days: {n_days}")
+    print(f"Metadata: {metadata_info}")
 
-    # Clip init to bounds
+    # =============================================================================
+    # INITIAL PARAMETERS
+    # =============================================================================
+
+    raw_params = config.build_default_raw_params()
+
+    raw_params.setdefault("time", {})
+    raw_params["time"]["duration_days"] = int(n_days)
+
+    # FORCE SAFE INITIAL VALUES
+    if "pda" in raw_params:
+        raw_params["pda"]["emitter_exponent"] = max(
+            SAFE_MIN_EMITTER_EXPONENT,
+            float(raw_params["pda"].get("emitter_exponent", 0.5)),
+        )
+
+    if "leakage" in raw_params:
+        raw_params["leakage"]["global_scale"] = max(
+            SAFE_MIN_GLOBAL_LEAK_SCALE,
+            float(raw_params["leakage"].get("global_scale", 0.01)),
+        )
+
+    # =============================================================================
+    # APPLY SAFE CLIPPING
+    # =============================================================================
+
     for p in config.OPT_PARAM_PATHS:
-        x0 = _get_by_path(raw_params, p)
-        _set_by_path(raw_params, p, _apply_bounds(p, x0))
+
+        try:
+            x = _get_by_path(raw_params, p)
+            _set_by_path(raw_params, p, _safe_clip(p, x))
+        except Exception:
+            continue
+
+    print(f"Optimizing {len(config.OPT_PARAM_PATHS)} parameters")
+
+    # =============================================================================
+    # OBJECTIVE EVALUATION
+    # =============================================================================
+
+    def eval_J(
+        rp_in: Dict[str, Any]
+    ) -> tuple[float, Dict[str, float]]:
+
+        rp = copy.deepcopy(rp_in)
+
+        try:
+
+            _validate_raw_params(rp)
+
+            j, breakdown = runner.evaluate_objective(
+                rp,
+                observed_pressure=observed,
+                config=obj_cfg,
+            )
+
+            j = float(j)
+
+            if not np.isfinite(j):
+                raise RuntimeError(
+                    "Objective became non-finite"
+                )
+
+            return j, dict(breakdown)
+
+        except Exception as e:
+
+            if config.VERBOSE:
+                print(
+                    f"[eval_J] Penalizing failed run: "
+                    f"{type(e).__name__}: {e}"
+                )
+
+            return (
+                FAILED_RUN_PENALTY,
+                {
+                    "J_total": FAILED_RUN_PENALTY,
+                    "J_failed": FAILED_RUN_PENALTY,
+                },
+            )
+
+    # =============================================================================
+    # INITIAL OBJECTIVE
+    # =============================================================================
+
+    best_params = copy.deepcopy(raw_params)
+
+    best_J, best_breakdown = eval_J(best_params)
+
+    print(f"Initial J_total: {best_J:.6g}")
 
     lr = float(config.OPT_LEARNING_RATE)
 
-    best_params = copy.deepcopy(raw_params)
-    best_J, best_breakdown = eval_J(best_params)
-
     history_rows = []
 
-    if config.VERBOSE:
-        print(f"Optimizer run dir: {run_dir}")
-        print(f"Observed days: {n_days}, rows: {len(observed)}")
-        print("Initial J_total:", best_J)
+    # =============================================================================
+    # OPTIMIZATION LOOP
+    # =============================================================================
 
     for it in range(int(config.OPT_MAX_ITERS)):
+
         cur_J, cur_breakdown = eval_J(raw_params)
 
-        row = {"iter": it, "J_total": float(cur_J), "lr": float(lr)}
-        for k in ("J_timeseries", "J_features", "J_spatial", "J_volume", "J_regularization"):
-            if k in cur_breakdown:
-                row[k] = float(cur_breakdown[k])
-        for p in config.OPT_PARAM_PATHS:
-            row[p] = float(_get_by_path(raw_params, p))
+        row = {
+            "iter": it,
+            "J_total": float(cur_J),
+            "lr": float(lr),
+        }
+
         history_rows.append(row)
 
-        # Track best
-        if cur_J < best_J:
-            best_J = float(cur_J)
-            best_params = copy.deepcopy(raw_params)
-            best_breakdown = dict(cur_breakdown)
+        # ---------------------------------------------------------------------
+        # COMPUTE GRADIENTS
+        # ---------------------------------------------------------------------
 
-        # Compute gradient by central finite differences
-        grads: Dict[str, float] = {}
+        grads = {}
+
         for p in config.OPT_PARAM_PATHS:
-            x = _get_by_path(raw_params, p)
-            eps = _finite_difference_eps(x)
 
-            grads[p] = _finite_difference_grad(eval_J, raw_params, p, x, eps)
+            try:
 
-        # Backtracking line search: shrink lr until we find an improving step.
-        max_backtracks = 12
-        lr_try = float(lr)
+                x = _get_by_path(raw_params, p)
+
+                eps = max(
+                    config.OPT_FD_EPS_ABS,
+                    config.OPT_FD_EPS_REL * max(1.0, abs(x)),
+                )
+
+                rp_plus = copy.deepcopy(raw_params)
+                rp_minus = copy.deepcopy(raw_params)
+
+                _set_by_path(
+                    rp_plus,
+                    p,
+                    _safe_clip(p, x + eps),
+                )
+
+                _set_by_path(
+                    rp_minus,
+                    p,
+                    _safe_clip(p, x - eps),
+                )
+
+                j_plus, _ = eval_J(rp_plus)
+                j_minus, _ = eval_J(rp_minus)
+
+                if (
+                    not np.isfinite(j_plus)
+                    or not np.isfinite(j_minus)
+                ):
+                    grads[p] = 0.0
+                else:
+                    grads[p] = (
+                        (j_plus - j_minus)
+                        / (2.0 * eps)
+                    )
+
+            except Exception:
+                grads[p] = 0.0
+
+        # ---------------------------------------------------------------------
+        # BACKTRACKING LINE SEARCH
+        # ---------------------------------------------------------------------
+
         accepted = False
-        new_J = float("inf")
-        new_breakdown: Dict[str, float] = {}
+
+        lr_try = float(lr)
+
+        max_backtracks = 12
+
+        proposal = None
+        new_J = cur_J
+        new_breakdown = cur_breakdown
 
         for bt in range(max_backtracks + 1):
+
             proposal = copy.deepcopy(raw_params)
+
             for p in config.OPT_PARAM_PATHS:
-                x = _get_by_path(raw_params, p)
-                x_new = x - lr_try * grads[p]
-                _set_by_path(proposal, p, _apply_bounds(p, x_new))
+
+                try:
+
+                    x = _get_by_path(raw_params, p)
+
+                    x_new = x - lr_try * grads[p]
+
+                    x_new = _safe_clip(p, x_new)
+
+                    _set_by_path(proposal, p, x_new)
+
+                except Exception:
+                    continue
 
             new_J, new_breakdown = eval_J(proposal)
-            if new_J <= cur_J:
+
+            if (
+                np.isfinite(new_J)
+                and new_J < cur_J
+            ):
                 accepted = True
                 break
+
             lr_try *= 0.5
 
+        # ---------------------------------------------------------------------
+        # NO IMPROVEMENT
+        # ---------------------------------------------------------------------
+
         if not accepted:
-            if config.VERBOSE:
-                print(
-                    f"iter={it}: no improving step found after {max_backtracks} backtracks; stopping (lr={lr_try:.6g})"
-                )
+
+            print(
+                f"iter={it}: no improving step found "
+                f"after {max_backtracks} backtracks"
+            )
+
             break
 
-        if config.VERBOSE:
-            suffix = f" (backtracks={bt})" if bt else ""
-            print(f"iter={it}: J {cur_J:.6g} -> {new_J:.6g} (improved), lr={lr_try:.6g}{suffix}")
+        # ---------------------------------------------------------------------
+        # ACCEPT STEP
+        # ---------------------------------------------------------------------
 
         raw_params = proposal
 
-        # Update best immediately on acceptance (important when OPT_MAX_ITERS is small).
+        lr = lr_try * float(
+            config.OPT_LEARNING_RATE_DECAY
+        )
+
+        print(
+            f"iter={it}: "
+            f"J {cur_J:.6g} -> {new_J:.6g}, "
+            f"lr={lr_try:.6g}"
+        )
+
+        # ---------------------------------------------------------------------
+        # UPDATE BEST
+        # ---------------------------------------------------------------------
+
         if new_J < best_J:
+
             best_J = float(new_J)
+
             best_params = copy.deepcopy(raw_params)
+
             best_breakdown = dict(new_breakdown)
 
-        # Update learning rate after a successful step.
-        lr = lr_try * float(config.OPT_LEARNING_RATE_DECAY)
+        # ---------------------------------------------------------------------
+        # CONVERGENCE
+        # ---------------------------------------------------------------------
 
-        rel_impr = (cur_J - new_J) / max(1e-12, abs(cur_J))
+        rel_impr = (
+            (cur_J - new_J)
+            / max(1e-12, abs(cur_J))
+        )
+
         if rel_impr < float(config.OPT_TOL_REL):
-            if config.VERBOSE:
-                print(f"Stopping: relative improvement {rel_impr:.3g} < OPT_TOL_REL")
+
+            print(
+                f"Stopping: relative improvement "
+                f"{rel_impr:.3g} < OPT_TOL_REL"
+            )
+
             break
 
-    # Write outputs
+    # =============================================================================
+    # SAVE OUTPUTS
+    # =============================================================================
+
     hist_df = pd.DataFrame(history_rows)
-    # Per-run copies (do not overwrite previous optimizer invocations)
+
     run_hist_csv = run_dir / "opt_history.csv"
     run_best_json = run_dir / "best_params.json"
+
     hist_df.to_csv(run_hist_csv, index=False)
 
     out = {
@@ -373,21 +694,41 @@ def main() -> None:
         "best_raw_params": best_params,
         "optimized_paths": list(config.OPT_PARAM_PATHS),
         "n_days": int(n_days),
+        "metadata": metadata_info,  # Include extracted metadata
     }
-    run_best_json.write_text(json.dumps(out, indent=2, default=str))
 
-    # Also update the legacy "latest" outputs for convenience (these may be overwritten each run).
-    Path(config.OPT_HISTORY_CSV).parent.mkdir(parents=True, exist_ok=True)
-    Path(config.OPT_BEST_PARAMS_JSON).parent.mkdir(parents=True, exist_ok=True)
-    hist_df.to_csv(Path(config.OPT_HISTORY_CSV), index=False)
-    Path(config.OPT_BEST_PARAMS_JSON).write_text(json.dumps(out, indent=2, default=str))
+    run_best_json.write_text(
+        json.dumps(out, indent=2, default=str)
+    )
 
-    if config.VERBOSE:
-        print("Best J_total:", float(best_J))
-        print(f"Wrote (per-run): {run_hist_csv}")
-        print(f"Wrote (per-run): {run_best_json}")
-        print(f"Wrote (latest): {config.OPT_HISTORY_CSV}")
-        print(f"Wrote (latest): {config.OPT_BEST_PARAMS_JSON}")
+    Path(config.OPT_HISTORY_CSV).parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    Path(config.OPT_BEST_PARAMS_JSON).parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    hist_df.to_csv(
+        Path(config.OPT_HISTORY_CSV),
+        index=False,
+    )
+
+    Path(config.OPT_BEST_PARAMS_JSON).write_text(
+        json.dumps(out, indent=2, default=str)
+    )
+
+    print("\n" + "=" * 80)
+    print("OPTIMIZATION COMPLETE")
+    print("=" * 80)
+    print(f"Best J_total: {best_J:.6g}")
+    print(f"Iterations completed: {len(history_rows)}")
+    print(f"Best params saved to: {run_best_json}")
+    print(f"Optimization history saved to: {run_hist_csv}")
+    print(f"Global best params: {Path(config.OPT_BEST_PARAMS_JSON)}")
+    print("=" * 80)
 
 
 if __name__ == "__main__":

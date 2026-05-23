@@ -40,45 +40,41 @@ OBSERVED_PRESSURE_CSV: str | None = None
 # Optional: provide multiple observed CSVs (e.g., one per day). If set, this list is used
 # and OBSERVED_PRESSURE_CSV is ignored. Each CSV can have its own time column, but the
 # column name must be the same across files if you set OBSERVED_TIME_COLUMN.
-OBSERVED_PRESSURE_CSVS: list[str] | None = ["Data/HourlyData_2025-12-18.csv", "Data/HourlyData_2025-12-19.csv", "Data/HourlyData_2025-12-20.csv"]
+OBSERVED_PRESSURE_CSVS: list[str] | None = [
+    "Data/HourlyData_2025-12-18.csv",
+    "Data/HourlyData_2025-12-19.csv",
+    "Data/HourlyData_2025-12-20.csv",
+]
 
 # Optional: if your observed CSV's time column is NOT the first column, set it here.
 # If None, the loader assumes the first column is the time column.
 OBSERVED_TIME_COLUMN: str | None = None
 
 
-# Optional: node->zone mapping CSV created by scripts/assign_zones_from_coords.py
-# Set to None to keep all zones as "UNKNOWN".
-ZONE_MAP_CSV: str | None = None
+# ---- ZONE MAPPING (VORONOI-ONLY APPROACH) ----
+# Zones are now assigned via Voronoi distribution (each node -> nearest sensor).
+# This is the scientifically recommended approach:
+# - Equitable spatial distribution (each sensor has a natural service area)
+# - No overlaps or gaps
+# - Scales naturally with any number of sensors
+# - Reflects actual water flow patterns
 
-# If True and ZONE_MAP_CSV is None, derive zones directly from INP [COORDINATES]
-# (median split into 4 zones).
+# Option 1: Load pre-computed Voronoi zones from CSV (recommended for reproducibility)
+ZONE_MAP_CSV: str | None = "outputs/node_zones_voronoi.csv"
+
+# Option 2: Compute Voronoi zones on-the-fly from INP coordinates
+# (only used if ZONE_MAP_CSV is None)
 AUTO_ZONES_FROM_INP: bool = True
-
-# Zone assignment mode for AUTO_ZONES_FROM_INP. Currently supported: "grid".
-# Supported: "grid", "circular"
-ZONE_ASSIGN_MODE: str = "circular"
+ZONE_ASSIGN_MODE: str = "voronoi"  # Only 'voronoi' is supported (grid/circular are deprecated)
 
 # Which INP nodes are eligible to be assigned zones.
-# - None: consider all nodes that have coordinates
-# - "HOUSEEND_": only assign zones to HOUSEEND nodes (legacy behavior)
-# For circular zoning + leak calibration, you typically want None.
+# - None: consider all nodes that have coordinates (recommended for Voronoi)
+# - "HOUSEEND_": only assign zones to HOUSEEND nodes (legacy, not recommended)
 ZONE_NODE_PREFIX: str | None = None
 
-# Circular zone definitions (used when ZONE_ASSIGN_MODE == "circular").
-# - Coordinates and radius use the same units as INP [COORDINATES].
-# - Nodes outside all circles remain as service nodes with zone "UNKNOWN".
-# - Overlaps are resolved by nearest center.
-ZONE_CIRCULAR_SPECS: list[dict] = [
-    
-    {"zone": "Z_A", "center_node": "HOUSEEND_16598", "radius": 193.0},
-    {"zone": "Z_B", "center_node": "HOUSEEND_16426", "radius": 132.0},
-    {"zone": "Z_C", "center_node": "HOUSEEND_16702", "radius": 327.0},
-    {"zone": "Z_D", "center_node": "HOUSEEND_16032", "radius": 118.0},
-]
-
-# When circular zoning is enabled, optionally drop HOUSEEND nodes that aren't assigned to any zone.
-# Default False: nodes outside all circles still exist and simply have zone "UNKNOWN".
+# Note: ZONE_CIRCULAR_SPECS is now DEPRECATED and ignored.
+# Circular zoning is no longer supported. Use Voronoi instead.
+ZONE_CIRCULAR_SPECS: list[dict] = []  # DEPRECATED - DO NOT USE
 ZONE_IGNORE_UNASSIGNED_NODES: bool = False
 
 
@@ -135,7 +131,7 @@ OBJECTIVE_WEIGHTS: dict[str, float] = {
 #   - "demand.demand_multiplier"
 #   - "pda.required_pressure"
 #   - "pattern_family.morning_center"
-#   - "leakage.zone_multipliers.Z_NW"   (if you enable zone leakage)
+#   - "leakage.zone_multipliers.Z_0"   (Voronoi zone 0)
 OPT_PARAM_PATHS: list[str] = [
     "demand.demand_multiplier",
     "pda.required_pressure",
@@ -158,23 +154,22 @@ OPT_PARAM_PATHS: list[str] = [
     "pattern_family.floor",
     "leakage.global_scale",
     "leakage.emitter_exponent",
-    "zone_multipliers.Z_A",
 ]
 
 # Add zone leakage multipliers to the optimization set (one parameter per zone).
-# Note: These only matter if you also configure leak nodes (LEAK_NODE_IDS or LEAK_NODE_PREFIXES).
-if AUTO_ZONES_FROM_INP and LEAKS_ENABLED:
-    if ZONE_ASSIGN_MODE == "circular" and ZONE_CIRCULAR_SPECS:
-        OPT_PARAM_PATHS.extend([f"leakage.zone_multipliers.{z['zone']}" for z in ZONE_CIRCULAR_SPECS])
-    elif ZONE_ASSIGN_MODE == "grid":
-        OPT_PARAM_PATHS.extend(
-            [
-                "leakage.zone_multipliers.Z_NW",
-                "leakage.zone_multipliers.Z_NE",
-                "leakage.zone_multipliers.Z_SW",
-                "leakage.zone_multipliers.Z_SE",
-            ]
-        )
+# Zones are dynamically determined from Voronoi mapping.
+if LEAKS_ENABLED:
+    if ZONE_MAP_CSV:
+        # Using pre-computed Voronoi CSV: add zone multipliers for all zones in the CSV
+        zone_by_node = load_zone_mapping_csv(ZONE_MAP_CSV)
+        unique_zones = sorted(set(zone_by_node.values()))
+        OPT_PARAM_PATHS.extend([f"leakage.zone_multipliers.{z}" for z in unique_zones])
+    elif AUTO_ZONES_FROM_INP and ZONE_ASSIGN_MODE == "voronoi":
+        # Voronoi zones are named Z_0, Z_1, Z_2, ... (N = number of sensors)
+        # Dynamically add zone multipliers based on number of sensors
+        n_sensors = len(SENSOR_NODES)
+        for i in range(n_sensors):
+            OPT_PARAM_PATHS.append(f"leakage.zone_multipliers.Z_{i}")
 
 # Optional bounds per parameter path.
 # Any param not listed here is left unbounded.
@@ -182,7 +177,6 @@ OPT_BOUNDS: dict[str, tuple[float, float]] = {
     # Guard rails for parameters that must stay non-negative / positive to satisfy
     # validation in calibration/parameterization_layer.py.
     "demand.demand_multiplier": (1e-6, 10.0),
-
     # Demand pattern family bounds (see calibration/datamodels.py: PatternFamilyParams).
     # Centers are hours in [0, 23]. Widths are in hours and must be > 0.
     # Weights and floor are kept non-negative to avoid negative hourly demands.
@@ -198,26 +192,26 @@ OPT_BOUNDS: dict[str, tuple[float, float]] = {
     "pattern_family.background_weight": (0.0, 5.0),
     # Keep a tiny floor so the pattern sum stays positive even if all weights drift to 0.
     "pattern_family.floor": (1e-6, 2.0),
-
     # Exponents close to zero can lead to numerical issues.
     "pda.pressure_exponent": (0.05, 5.0),
     "leakage.global_scale": (0.0, 50.0),
     # EPANET emitter law is Q = C * P^n. Extremely small n can produce NaNs
     # (e.g., when pressures dip negative). Keep n in a reasonable range.
     "leakage.emitter_exponent": (0.1, 2.0),
-
-    # Optional tighter bounds (uncomment if you want a smaller search space):
-    # "pda.required_pressure": (8.0, 35.0),
-    # "pda.minimum_pressure": (0.0, 10.0),
 }
 
 if LEAKS_ENABLED:
-    if ZONE_ASSIGN_MODE == "circular" and ZONE_CIRCULAR_SPECS:
-        for z in ZONE_CIRCULAR_SPECS:
-            OPT_BOUNDS[f"leakage.zone_multipliers.{z['zone']}"] = (0.0, 5.0)
-    elif ZONE_ASSIGN_MODE == "grid":
-        for zname in ("Z_NW", "Z_NE", "Z_SW", "Z_SE"):
-            OPT_BOUNDS[f"leakage.zone_multipliers.{zname}"] = (0.0, 5.0)
+    if ZONE_MAP_CSV:
+        # Using pre-computed Voronoi CSV: add bounds for all zones in the CSV
+        zone_by_node = load_zone_mapping_csv(ZONE_MAP_CSV)
+        unique_zones = sorted(set(zone_by_node.values()))
+        for z in unique_zones:
+            OPT_BOUNDS[f"leakage.zone_multipliers.{z}"] = (0.0, 5.0)
+    elif AUTO_ZONES_FROM_INP and ZONE_ASSIGN_MODE == "voronoi":
+        # Voronoi zones: add bounds for Z_0, Z_1, ..., Z_(N-1)
+        n_sensors = len(SENSOR_NODES)
+        for i in range(n_sensors):
+            OPT_BOUNDS[f"leakage.zone_multipliers.Z_{i}"] = (0.0, 5.0)
 
 # Gradient descent settings
 OPT_MAX_ITERS: int = 100
@@ -237,26 +231,37 @@ OPT_BEST_PARAMS_JSON = REPORTS_DIR / "best_params.json"
 
 
 def build_default_metadata():
+    """Build metadata with Voronoi-based zone assignment.
+    
+    Flow:
+    1. Load or compute Voronoi zones from sensor nodes
+    2. Assign all junctions to their nearest sensor zone (Z_0, Z_1, ...)
+    3. Create service nodes with zone assignments
+    4. Auto-create leak nodes from zoned junctions (if LEAK_NODES_FROM_ZONES=True)
+    """
     zone_by_node = None
+
     if ZONE_MAP_CSV:
+        # Option 1: Load pre-computed zones from CSV
         zone_by_node = load_zone_mapping_csv(ZONE_MAP_CSV)
     elif AUTO_ZONES_FROM_INP:
+        # Option 2: Compute Voronoi zones on-the-fly
         zone_by_node = build_zone_mapping_from_inp(
             MODEL_INP,
-            mode=ZONE_ASSIGN_MODE,
+            mode="voronoi",
             node_prefix=ZONE_NODE_PREFIX,
-            circular_specs=ZONE_CIRCULAR_SPECS if ZONE_ASSIGN_MODE == "circular" else None,
+            sensor_nodes=SENSOR_NODES,
         )
 
     metadata, info = build_service_nodes_from_inp(
         MODEL_INP,
         sensor_nodes=SENSOR_NODES,
         zone_by_node=zone_by_node,
-        ignore_unmapped_zones=bool(ZONE_IGNORE_UNASSIGNED_NODES and ZONE_ASSIGN_MODE == "circular"),
+        ignore_unmapped_zones=bool(ZONE_IGNORE_UNASSIGNED_NODES),
     )
 
     # Optional leak nodes where emitters are applied.
-    # 1) from zones: all JUNCTION nodes that are assigned a zone (inside circles / grid zones)
+    # 1) from zones: all JUNCTION nodes that are assigned a zone (inside Voronoi cells)
     leak_ids: list[str] = []
     if LEAK_NODES_FROM_ZONES and zone_by_node:
         import wntr
@@ -300,16 +305,26 @@ def build_default_metadata():
 
 
 def build_default_raw_params() -> dict:
+    """Build default raw parameters with Voronoi zone multipliers.
+    
+    Zone multipliers are named Z_0, Z_1, Z_2, ... based on sensor count.
+    """
     raw = build_example_raw_params()
 
-    # Seed zone multipliers for whichever zones exist, so optimization has a sensible start.
+    # Seed zone multipliers for whichever zones exist (Voronoi-based)
     lk = raw.setdefault("leakage", {})
     zm = lk.setdefault("zone_multipliers", {})
-    if ZONE_ASSIGN_MODE == "circular" and ZONE_CIRCULAR_SPECS:
-        for z in ZONE_CIRCULAR_SPECS:
-            zm.setdefault(str(z["zone"]), 1.0)
-    elif AUTO_ZONES_FROM_INP and ZONE_ASSIGN_MODE == "grid":
-        for zname in ("Z_NW", "Z_NE", "Z_SW", "Z_SE"):
-            zm.setdefault(zname, 1.0)
+
+    if ZONE_MAP_CSV:
+        # Using pre-computed Voronoi CSV
+        zone_by_node = load_zone_mapping_csv(ZONE_MAP_CSV)
+        unique_zones = sorted(set(zone_by_node.values()))
+        for z in unique_zones:
+            zm.setdefault(str(z), 1.0)
+    elif AUTO_ZONES_FROM_INP and ZONE_ASSIGN_MODE == "voronoi":
+        # Voronoi zones: Z_0, Z_1, ..., Z_(N-1) where N = number of sensors
+        n_sensors = len(SENSOR_NODES)
+        for i in range(n_sensors):
+            zm.setdefault(f"Z_{i}", 1.0)
 
     return raw

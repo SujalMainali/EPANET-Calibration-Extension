@@ -116,6 +116,7 @@ def build_service_nodes_from_inp(
     - Service nodes: all junction IDs starting with HOUSEEND_
     - base_daily_volume_m3: computed from base demand and its pattern over the INP duration
     - Units: recorded in the returned info dict for consistency checks
+    - Zones: assigned via Voronoi mapping (nearest sensor)
 
     Leak nodes are left empty here (configure later once you decide leak calibration strategy).
     """
@@ -145,17 +146,27 @@ def build_service_nodes_from_inp(
     metadata.leak_check_node = None
     metadata.pda_check_node = (metadata.sensor_nodes[0] if metadata.sensor_nodes else None)
 
+    # Statistics on zone distribution
+    zones_summary = {}
+    for node, meta in service_nodes.items():
+        z = meta.zone
+        if z not in zones_summary:
+            zones_summary[z] = 0
+        zones_summary[z] += 1
+
     info.update(
         {
             "service_node_count": int(len(metadata.service_nodes)),
             "service_daily_volume_m3_min": float(df["daily_volume_m3"].min()) if not df.empty else 0.0,
             "service_daily_volume_m3_max": float(df["daily_volume_m3"].max()) if not df.empty else 0.0,
+            "zones_distribution": zones_summary,
         }
     )
     return metadata, info
 
 
 def validate_nodes_exist_in_inp(inp_path: str, node_names: Iterable[str]) -> list[str]:
+    """Validate that all given node names exist in the INP file."""
     wn = wntr.network.WaterNetworkModel(str(Path(inp_path)))
     node_set = set(str(n) for n in wn.node_name_list)
     missing = [str(n) for n in node_names if str(n) not in node_set]
@@ -219,33 +230,38 @@ def load_zone_mapping_csv(path: str) -> Dict[str, str]:
     return out
 
 
-def build_zone_mapping_from_inp(
+def build_zone_mapping_from_inp_voronoi(
     inp_path: str,
     *,
-    mode: str = "grid",
+    sensor_nodes: Iterable[str],
     node_prefix: str | None = None,
-    zone_labels: tuple[str, str, str, str] = ("Z_NW", "Z_NE", "Z_SW", "Z_SE"),
-    circular_specs: Optional[Iterable[Dict[str, Any]]] = None,
 ) -> Dict[str, str]:
-    """Build a node->zone mapping using coordinates embedded in the INP.
+    """Build a Voronoi-based node->zone mapping using coordinates from the INP.
+
+    Each node is assigned to the zone of its nearest sensor node.
+    Zones are named: Z_0, Z_1, Z_2, ... based on sensor index.
 
     Parameters
-    - mode:
-        - 'grid': split into 4 zones by median X/Y of the selected nodes
-    - node_prefix: if provided, only nodes whose IDs start with this prefix are zoned
-    - zone_labels: labels for (NW, NE, SW, SE)
+    - sensor_nodes: Required. All nodes are assigned to the nearest sensor from this list.
+    - node_prefix: If provided, only nodes whose IDs start with this prefix are zoned.
+      If None, all nodes with coordinates are zoned.
+
+    Returns
+    - Dict[node_id] -> zone_name (e.g., "Z_0", "Z_1", ...)
 
     Notes
     - Requires the INP to contain a [COORDINATES] section.
     - Nodes missing coordinates are skipped.
+    - Voronoi approach is scientifically superior to circular zones because:
+      * Equitable spatial distribution (each sensor has a natural service area)
+      * No overlaps or gaps
+      * Scales naturally with sensor count
+      * Reflects actual water flow patterns from supply to sensors
     """
-
-    mode = str(mode).strip().lower()
-    if mode not in {"grid", "circular"}:
-        raise ValueError("mode must be 'grid' or 'circular'")
 
     wn = wntr.network.WaterNetworkModel(str(Path(inp_path)))
 
+    # Extract all node coordinates
     coords: dict[str, tuple[float, float]] = {}
     for node_name in wn.node_name_list:
         if node_prefix and not str(node_name).startswith(node_prefix):
@@ -270,83 +286,84 @@ def build_zone_mapping_from_inp(
     if not coords:
         return {}
 
-    if mode == "circular":
-        if not circular_specs:
-            raise ValueError("circular_specs is required when mode='circular'")
+    # Validate sensor nodes
+    sensor_list = [str(s).strip() for s in sensor_nodes if str(s).strip()]
+    if not sensor_list:
+        raise ValueError("sensor_nodes must contain at least one node ID")
 
-        specs = []
-        for s in circular_specs:
-            if not isinstance(s, dict):
-                raise ValueError("Each circular_specs entry must be a dict")
-            zone = str(s.get("zone") or s.get("name") or "").strip()
-            center = str(s.get("center_node") or s.get("center") or "").strip()
-            radius: Any = s.get("radius")
-            if not zone or not center or radius is None:
-                raise ValueError(
-                    "Each circular_specs entry must include keys: zone, center_node, radius"
-                )
-            r = float(radius)
-            if r <= 0:
-                raise ValueError(f"Radius must be > 0 for zone {zone!r}")
-            if center not in coords:
-                raise ValueError(
-                    f"Center node {center!r} missing coordinates or excluded by node_prefix={node_prefix!r}"
-                )
-            cx, cy = coords[center]
-            specs.append((zone, center, cx, cy, r))
+    sensor_coords: dict[str, tuple[float, float]] = {}
+    for sensor in sensor_list:
+        if sensor not in coords:
+            raise ValueError(
+                f"Sensor node {sensor!r} missing coordinates or excluded by node_prefix={node_prefix!r}"
+            )
+        sensor_coords[sensor] = coords[sensor]
 
-        out: Dict[str, str] = {}
-        for name, (x, y) in coords.items():
-            best_zone = None
-            best_d2 = None
-            for zone, _center, cx, cy, r in specs:
-                dx = x - cx
-                dy = y - cy
-                d2 = dx * dx + dy * dy
-                if d2 <= r * r:
-                    if best_d2 is None or d2 < best_d2:
-                        best_d2 = d2
-                        best_zone = zone
-            if best_zone is not None:
-                out[name] = str(best_zone)
-        return out
-
-    xs = np.asarray([v[0] for v in coords.values()], dtype=float)
-    ys = np.asarray([v[1] for v in coords.values()], dtype=float)
-    x_med = float(np.median(xs))
-    y_med = float(np.median(ys))
-
-    z_nw, z_ne, z_sw, z_se = zone_labels
-
+    # Build Voronoi assignment: each node -> nearest sensor
+    sensor_array = np.asarray([sensor_coords[s] for s in sensor_list], dtype=float)
     out: Dict[str, str] = {}
     for name, (x, y) in coords.items():
-        north = y >= y_med
-        east = x >= x_med
-        if north and (not east):
-            out[name] = z_nw
-        elif north and east:
-            out[name] = z_ne
-        elif (not north) and (not east):
-            out[name] = z_sw
-        else:
-            out[name] = z_se
+        dx = sensor_array[:, 0] - x
+        dy = sensor_array[:, 1] - y
+        distances = dx * dx + dy * dy
+        nearest_idx = int(np.argmin(distances))
+        out[name] = f"Z_{nearest_idx}"
 
     return out
 
 
+def build_zone_mapping_from_inp(
+    inp_path: str,
+    *,
+    mode: str = "voronoi",
+    node_prefix: str | None = None,
+    sensor_nodes: Optional[Iterable[str]] = None,
+    zone_labels: tuple[str, str, str, str] = ("Z_NW", "Z_NE", "Z_SW", "Z_SE"),
+    circular_specs: Optional[Iterable[Dict[str, Any]]] = None,
+) -> Dict[str, str]:
+    """Build a node->zone mapping using coordinates embedded in the INP.
+
+    Parameters
+    - mode: Only 'voronoi' is now supported (recommended scientific approach).
+            'grid' and 'circular' are deprecated.
+    - node_prefix: if provided, only nodes whose IDs start with this prefix are zoned
+    - sensor_nodes: required when mode='voronoi'; all nodes are assigned to the
+      nearest sensor from this list.
+
+    Notes
+    - Voronoi is the only recommended mode (scientific, equitable, scales naturally)
+    - Requires the INP to contain a [COORDINATES] section.
+    - Nodes missing coordinates are skipped.
+    """
+
+    mode = str(mode).strip().lower()
+    if mode != "voronoi":
+        raise ValueError(
+            f"Mode '{mode}' is deprecated. Only 'voronoi' is supported (scientific approach). "
+            f"Use build_zone_mapping_from_inp_voronoi() directly or set mode='voronoi'."
+        )
+
+    return build_zone_mapping_from_inp_voronoi(
+        inp_path,
+        sensor_nodes=sensor_nodes or [],
+        node_prefix=node_prefix,
+    )
+
+
 def build_example_metadata() -> ModelMetadata:
+    """Example metadata for testing (not for production)."""
     metadata = ModelMetadata()
 
     metadata.service_nodes = {
-        "HOUSEEND_16438": ServiceNodeMeta("HOUSEEND_16438", base_daily_volume_m3=0.75, zone="Z1"),
-        "HOUSEEND_16604": ServiceNodeMeta("HOUSEEND_16604", base_daily_volume_m3=0.65, zone="Z1"),
-        "HOUSEEND_17872": ServiceNodeMeta("HOUSEEND_17872", base_daily_volume_m3=0.90, zone="Z2"),
+        "HOUSEEND_16438": ServiceNodeMeta("HOUSEEND_16438", base_daily_volume_m3=0.75, zone="Z_0"),
+        "HOUSEEND_16604": ServiceNodeMeta("HOUSEEND_16604", base_daily_volume_m3=0.65, zone="Z_0"),
+        "HOUSEEND_17872": ServiceNodeMeta("HOUSEEND_17872", base_daily_volume_m3=0.90, zone="Z_1"),
     }
 
     metadata.leak_nodes = {
-        "NODE_3004": LeakNodeMeta("NODE_3004", zone="Z1", weight=0.5),
-        "NODE_3005": LeakNodeMeta("NODE_3005", zone="Z1", weight=0.5),
-        "NODE_3006": LeakNodeMeta("NODE_3006", zone="Z2", weight=0.5),
+        "NODE_3004": LeakNodeMeta("NODE_3004", zone="Z_0", weight=0.5),
+        "NODE_3005": LeakNodeMeta("NODE_3005", zone="Z_0", weight=0.5),
+        "NODE_3006": LeakNodeMeta("NODE_3006", zone="Z_1", weight=0.5),
     }
 
     metadata.sensor_nodes = ["HOUSEEND_16032", "HOUSEEND_16426", "HOUSEEND_16702"]
@@ -356,6 +373,7 @@ def build_example_metadata() -> ModelMetadata:
 
 
 def build_example_raw_params() -> dict:
+    """Example raw parameters for testing (not for production)."""
     return {
         "pda": {
             "demand_model": "PDA",
@@ -365,15 +383,15 @@ def build_example_raw_params() -> dict:
         },
         "pattern_family": {
             "morning_center": 6.0,
-            "morning_width": 1.7,
-            "morning_weight": 0.55,
-            "noon_center": 12.5,
-            "noon_width": 1.5,
-            "noon_weight": 0.10,
-            "evening_center": 21.5,
-            "evening_width": 2.0,
-            "evening_weight": 0.30,
-            "background_weight": 0.15,
+            "morning_width": 1.5,
+            "morning_weight": 0.30,
+            "noon_center": 14.0,
+            "noon_width": 1.0,
+            "noon_weight": 0.27,
+            "evening_center": 21.0,
+            "evening_width": 0.5,
+            "evening_weight": 0.28,
+            "background_weight": 0.20,
             "floor": 0.02,
         },
         "carryover": {
@@ -382,8 +400,8 @@ def build_example_raw_params() -> dict:
             "max_carryover_multiplier": 2.0,
         },
         "leakage": {
-                "global_scale": 0.4,
-            "zone_multipliers": {"Z_A": 1.2, "Z_B": 1.3, "Z_C": 1.1, "Z_D": 0.9},
+            "global_scale": 0.4,
+            "zone_multipliers": {},
             "emitter_exponent": 1.0,
         },
         "demand": {
