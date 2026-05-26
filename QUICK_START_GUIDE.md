@@ -40,6 +40,23 @@ This will generate:
     • outputs/datasets/leak_dataset_wide.meta.json (metadata)
 
 
+EXPORT A CALIBRATED INP (FOR STANDARD EPANET)
+============================================
+
+After you have a calibrated parameter set (typically `outputs/reports/best_params.json`),
+you can export a plain EPANET `.inp` that bakes in the calibrated:
+    - PDA options + solver controls
+    - per-node dynamic demand patterns
+    - baseline leakage emitters
+
+Run:
+
+        python export_calibrated_inp.py --inp models/PATTERN.inp --params outputs/reports/best_params.json --out outputs/reports/calibrated_model.inp
+
+This will write:
+    • outputs/reports/calibrated_model.inp
+
+
 VERIFY CORRECTIONS
 ==================
 
