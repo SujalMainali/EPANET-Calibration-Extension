@@ -296,6 +296,24 @@ def _float_or_blank(x: Any) -> Any:
         return ""
 
 
+def _float_or_nan(x: Any) -> float:
+    """Best-effort float conversion; returns NaN when missing/invalid.
+
+    Used for long-format numeric columns where blanks would break dtypes.
+    """
+    if x is None:
+        return float("nan")
+    try:
+        if pd.isna(x):
+            return float("nan")
+    except Exception:
+        pass
+    try:
+        return float(x)
+    except Exception:
+        return float("nan")
+
+
 def _log_uniform(rng: np.random.Generator, low: float, high: float) -> float:
     return float(np.exp(rng.uniform(np.log(low), np.log(high))))
 
@@ -440,7 +458,10 @@ def generate_dataset_wide(
     # ── Load calibration ─────────────────────────────────────────────────
     raw_base         = _load_best_raw_params(Path(best_params_path))
     zone_multipliers = _get_zone_multipliers_from_params(raw_base)
-    global_scale     = _get_global_leakage_scale(raw_base)
+    global_scale_calib = _get_global_leakage_scale(raw_base)
+    # NOTE: `global_scale` below is the value actually used in the simulations.
+    # It may differ from calibrated scale when baseline_no_leaks=True.
+    global_scale = float(global_scale_calib)
     node_zone_map    = _build_node_zone_mapping_from_calibration(
         best_params_path)
 
@@ -453,14 +474,14 @@ def generate_dataset_wide(
     print("ZONE MAPPING SUMMARY")
     print(f"  Nodes mapped : {len(node_zone_map)}")
     print(f"  Zones found  : {sorted(zone_counts.keys())}")
-    print(f"  Global scale : {global_scale:.6f}")
+    print(f"  Global scale (calib) : {global_scale_calib:.6f}")
     print()
     print(f"  {'Zone':<8} {'Nodes':>6}  {'ZoneMult':>10}  "
           f"{'EffWeight':>12}  (NOT LeakNodeMeta.weight=1.0)")
     print("  " + "-" * 50)
     for z in sorted(zone_counts):
         zm = zone_multipliers.get(z, float("nan"))
-        ew = zm * global_scale
+        ew = zm * global_scale_calib
         print(f"  {z:<8} {zone_counts[z]:>6}  {zm:>10.4f}  {ew:>12.8f}")
     if len(zone_counts) == 1:
         print("\n  ⚠️  WARNING: only 1 zone → fallback likely triggered!")
@@ -482,6 +503,17 @@ def generate_dataset_wide(
     })
     if baseline_no_leaks:
         raw_base.setdefault("leakage", {})["global_scale"] = 0.0
+
+    # Use the simulation-time global_scale for all baseline coefficients.
+    # This ensures c_baseline/c_total and leak_size_lpm reflect what EPANET actually ran.
+    try:
+        global_scale = float(raw_base.get("leakage", {}).get("global_scale", global_scale))
+    except Exception:
+        global_scale = float(global_scale)
+
+    if baseline_no_leaks and global_scale != 0.0:
+        # Defensive: caller asked for no baseline leaks.
+        global_scale = 0.0
 
     runner    = build_runner(inp_path=inp_path,
                              metadata=config.build_default_metadata())
@@ -569,7 +601,9 @@ def generate_dataset_wide(
     print("Running baseline simulation …")
     try:
         _, base_results, _ = runner.build_and_run_once(
-            raw_base, nodes_to_read=set(obs_nodes),
+            # Include candidate leak nodes so we can compute leak-node
+            # baseline pressure drops without re-running baseline per scenario.
+            raw_base, nodes_to_read=set(obs_nodes) | set(candidates),
             emitter_window_overrides=None)
         base_ok = True
     except Exception as exc:
@@ -602,6 +636,9 @@ def generate_dataset_wide(
         "emitter_coeff_baseline": "", "emitter_coeff_added": "",
         "emitter_coeff_total": "", "leak_size_lpm": "",
         "leak_node_pressure": "", "leak_magnitude_class": "",
+        "leak_node_baseline_pressure": "",
+        "leak_node_pressure_drop_m": "",
+        "sanity_max_sensor_drop_m": "",
         "validation_status": "success" if base_ok else "failed",
     }
     for n in obs_nodes:
@@ -751,8 +788,45 @@ def generate_dataset_wide(
             "leak_node_pressure":        float(leak_node_pressure),
             "leak_magnitude_class": _get_leak_magnitude_class(
                 c_added, mag_thresholds),
+            "leak_node_baseline_pressure": "",
+            "leak_node_pressure_drop_m":   "",
+            # Sanity: maximum observed sensor drop (baseline - scenario) during leak window.
+            # Near 0 means the leak barely perturbed sensor pressures.
+            "sanity_max_sensor_drop_m":     "",
             "validation_status":         vstatus,
         }
+
+        # Compute leak-node baseline pressure + leak-node pressure drop.
+        try:
+            base_p_all = base_results.get("pressure", pd.DataFrame())
+            base_lp = (base_p_all[leak_node].copy()
+                       if (not base_p_all.empty and leak_node in base_p_all.columns)
+                       else pd.Series(dtype=float))
+            base_lp.index = base_lp.index.astype(int)
+            base_mask = (base_lp.index >= start_s) & (base_lp.index < end_s)
+            base_leak_p = float(base_lp.loc[base_mask].mean()) if base_mask.any() else float("nan")
+            row["leak_node_baseline_pressure"] = _float_or_blank(base_leak_p)
+            if np.isfinite(base_leak_p):
+                drop = float(base_leak_p - float(leak_node_pressure))
+                row["leak_node_pressure_drop_m"] = _float_or_blank(max(drop, 0.0))
+        except Exception:
+            pass
+
+        # Compute sanity_max_sensor_drop_m using available baseline sensor pressures.
+        # Use hourly sensor data (not leak_node) so it is cheap and robust.
+        try:
+            window_hours = list(range(int(start_hr), int(start_hr) + int(dur_hr)))
+            # Intersect with the simulated horizon.
+            window_hours = [h for h in window_hours if 0 <= h < int(total_hours)]
+            if window_hours and not hourly.empty and not base_hourly.empty:
+                cols = [c for c in obs_nodes if c in hourly.columns and c in base_hourly.columns]
+                if cols:
+                    drop = (base_hourly.loc[window_hours, cols] - hourly.loc[window_hours, cols])
+                    v = float(drop.max(numeric_only=True).max())
+                    row["sanity_max_sensor_drop_m"] = max(v, 0.0) if np.isfinite(v) else ""
+        except Exception:
+            # Leave blank if anything unexpected happens.
+            pass
 
         # Pressure columns only (DeltaP/Ratio can be computed post-hoc)
         for n in obs_nodes:
@@ -798,10 +872,8 @@ def generate_dataset_wide(
                         "leak_duration_hr":          dur_hr,
                         "leak_magnitude_class":      row["leak_magnitude_class"],
                         "leak_size_lpm":             float(leak_size_lpm),
-                        "pressure": (float(vl) if not pd.isna(vl)
-                                     else np.nan),
-                        "baseline_pressure": (float(vb) if not pd.isna(vb)
-                                              else np.nan),
+                        "pressure": _float_or_nan(vl),
+                        "baseline_pressure": _float_or_nan(vb),
                     })
 
         if sid % 50 == 0:
@@ -873,7 +945,9 @@ def generate_dataset_wide(
         "duration_days":              duration_days,
         "total_hours":                total_hours,
         "obs_nodes":                  obs_nodes,
-        "global_leakage_scale":       global_scale,
+        "global_leakage_scale":            float(global_scale),
+        "global_leakage_scale_calibrated": float(global_scale_calib),
+        "global_leakage_scale_sim":        float(global_scale),
         "zone_multipliers":           zone_multipliers,
         "zone_scenario_counts":       dict(zone_counter),
         "zone_counts_in_mapping":     zone_counts,
@@ -924,7 +998,7 @@ if __name__ == "__main__":
 
     # 3500 = 500 scenarios × 7 zones (stratified, publishable minimum)
     # Increase to 5600–8000 for node-level localisation tasks.
-    N_SCENARIOS = 8000
+    N_SCENARIOS = 100
     SEED        = 1
 
     LEAK_DURATION_HR      = 4.0
@@ -957,22 +1031,22 @@ if __name__ == "__main__":
     # large_burst  20.6284    92.25    100.00     107.19
     # major_burst  51.5711   230.63    250.00     267.97
     MAGNITUDE_CLASSES: Dict[str, List[float]] = {
-        "seep":         [0.1031],
-        "drip":         [0.4126],
-        "trickle":      [1.0314],
-        "near_thresh":  [1.1779],
-        "small_burst":  [3.0943],
-        "med_burst":    [8.2514],
-        "large_burst":  [20.6284],
-        "major_burst":  [51.5711],
+        "seep":         [85.2514],
+        "drip":         [98.4126],
+        "trickle":      [120.0314],
+        "near_thresh":  [170.1779],
+        "small_burst":  [250.0943],
+        "med_burst":    [300.2514],
+        "large_burst":  [330.6284],
+        "major_burst":  [430.5711],
     }
 
-    EMITTER_COEFF_MIN     = 0.1031   # seep lower bound
-    EMITTER_COEFF_MAX     = 51.5711  # major_burst upper bound
+    EMITTER_COEFF_MIN     = 85.2514   # seep lower bound
+    EMITTER_COEFF_MAX     = 430.5711  # major_burst upper bound
     EMITTER_COEFF_CHOICES: List[float] = []  # empty → use MAGNITUDE_CLASSES
 
     SAMPLE_MINUTES    = 60
-    BASELINE_NO_LEAKS = True
+    BASELINE_NO_LEAKS = False
     OVERRIDE_MODE     = "add"
 
     OUT_CSV_WIDE = "outputs/datasets/leak_dataset_wide.csv"
