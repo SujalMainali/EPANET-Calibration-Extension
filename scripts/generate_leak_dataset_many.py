@@ -471,6 +471,8 @@ def generate_dataset_wide(
     # ── Simulation config ─────────────────────────────────────────────────
     step_s   = int(sample_minutes) * 60
     raw_base = json.loads(json.dumps(raw_base))
+    # Override demand parameters to prevent calibration's inflated values from polluting dataset
+    raw_base.setdefault("demand", {})["demand_multiplier"] = 1.0
     raw_base.setdefault("time", {})
     raw_base["time"].update({
         "duration_days":        1,      # enforce 24-hour runs

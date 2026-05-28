@@ -237,6 +237,125 @@ def _apply_baseline_emitters_to_wn(
     return applied, missing
 
 
+def _preserve_non_service_node_patterns(base_inp_path: str) -> Dict[str, str | None]:
+    """
+    Record original pattern assignments for non-service nodes by reading the raw INP file.
+    
+    WNTR applies the default [OPTIONS] Pattern when loading, so we must parse the raw file
+    to capture which nodes originally had NO_PATTERN vs. an explicit pattern.
+    
+    Returns mapping of node_name -> original_pattern (None for nodes without pattern).
+    """
+    import re
+    
+    inp_path = Path(base_inp_path)
+    content = inp_path.read_text()
+    
+    original_patterns = {}
+    
+    # Extract [JUNCTIONS] section from raw INP
+    junctions_match = re.search(r'\[JUNCTIONS\](.*?)(?=\[|$)', content, re.DOTALL)
+    if not junctions_match:
+        return original_patterns
+    
+    junctions_text = junctions_match.group(1)
+    
+    for line in junctions_text.split('\n'):
+        # Skip comments and headers
+        if line.strip().startswith(';') or not line.strip():
+            continue
+        if 'ID' in line or 'Elev' in line:
+            continue
+        
+        # Parse junction line: node_id, elev, demand, [pattern], ; [comment]
+        # Using flexible whitespace splitting
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        
+        node_id = parts[0]
+        
+        # Skip service nodes - we don't need to preserve them
+        if node_id.startswith("HOUSEEND_"):
+            continue
+        
+        # The pattern would be in the 4th column (index 3) if present
+        # But we need to be careful: the pattern might not be there
+        pattern = None
+        if len(parts) >= 4:
+            potential_pattern = parts[3]
+            # Remove any trailing comment
+            potential_pattern = potential_pattern.split(';')[0].strip()
+            # Only set if it's not empty and looks like a pattern name (not a number)
+            if potential_pattern and not potential_pattern[0].isdigit():
+                pattern = potential_pattern
+        
+        original_patterns[node_id] = pattern
+    
+    return original_patterns
+
+
+def _restore_patterns_in_inp_file(
+    out_inp_path: str,
+    original_patterns: Dict[str, str | None],
+    service_node_prefix: str = "HOUSEEND_",
+) -> None:
+    """
+    Post-process the exported INP file to restore original pattern assignments for non-service nodes.
+    
+    WNTR applies the default [OPTIONS] Pattern to nodes without explicit patterns.
+    This function removes pattern assignments from infrastructure nodes that originally had NO_PATTERN.
+    
+    Note: WNTR may rename nodes (e.g., HOUSE_* -> HOUSE_EPN_*), so we match by pattern.
+    """
+    import re
+    
+    inp_path = Path(out_inp_path)
+    content = inp_path.read_text()
+    
+    # Nodes that originally had no pattern and need it removed
+    nodes_to_clean = [n for n, p in original_patterns.items() if p is None and not n.startswith(service_node_prefix)]
+    
+    if not nodes_to_clean:
+        return
+    
+    # Create mapping of possible node names in output
+    node_name_variants = {}
+    for node_name in nodes_to_clean:
+        variants = [node_name]
+        # If it starts with HOUSE_, also try HOUSE_EPN_*
+        if node_name.startswith("HOUSE_") and "EPN" not in node_name:
+            suffix = node_name[6:]  # Remove "HOUSE_"
+            variants.append(f"HOUSE_EPN_{suffix}")
+        node_name_variants[node_name] = variants
+    
+    # Remove patterns from matching lines
+    # Format in JUNCTIONS: ID  Elev  Demand  Pattern  ; comment
+    # We need to: match line, keep ID+Elev+Demand, remove Pattern, keep comment
+    
+    for orig_node_name, variants in node_name_variants.items():
+        for node_name in variants:
+            # This regex matches the junction line precisely:
+            # - Group 1: leading whitespace + node_name + whitespace + elevation + whitespace + demand
+            # - Unmatched: whitespace + pattern_name (gets removed)
+            # - Group 2: remaining content (comment)
+            escaped_name = re.escape(node_name)
+            pattern = rf"^(\s*{escaped_name}\s+[\d\.\-eE]+\s+[\d\.\-eE]+)(\s+\S+)?(\s+.*;.*)?$"
+            
+            def replacer(match):
+                # Reconstruct: ID Elev Demand + trailing space + comment (if exists)
+                result = match.group(1)  # ID + Elev + Demand
+                # Add comment if it exists
+                if match.group(3):
+                    result += match.group(3)
+                return result
+            
+            content = re.sub(pattern, replacer, content, flags=re.MULTILINE)
+    
+    inp_path.write_text(content)
+    print(f"Removed patterns from {len(nodes_to_clean)} non-service infrastructure nodes")
+
+
 def export_calibrated_inp(
     *,
     base_inp_path: str,
@@ -256,6 +375,10 @@ def export_calibrated_inp(
 
     hydraulic = HydraulicModelLayerENepanet(str(base_inp))
     wn_model = hydraulic.clone_network()
+    
+    # Preserve original pattern state for non-service nodes BEFORE modifications
+    original_patterns = _preserve_non_service_node_patterns(str(base_inp))
+    
     hydraulic.apply_pda_settings_to_inp_model(wn_model, params)
     hydraulic.apply_service_node_demands(wn_model, metadata, behavior, params)
 
@@ -268,6 +391,9 @@ def export_calibrated_inp(
     out_path = Path(out_inp_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     wntr.network.io.write_inpfile(wn_model, out_path)
+    
+    # Restore original patterns for non-service nodes AFTER writing
+    _restore_patterns_in_inp_file(str(out_path), original_patterns)
 
     print(f"Wrote calibrated INP: {str(out_path)}")
     print(f"Emitters applied: {applied}")

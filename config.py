@@ -127,33 +127,26 @@ OBJECTIVE_WEIGHTS: dict[str, float] = {
 # ---- Optimizer (gradient descent) ----
 
 # Which raw parameter paths to optimize.
-# Examples:
-#   - "demand.demand_multiplier"
-#   - "pda.required_pressure"
-#   - "pattern_family.morning_center"
-#   - "leakage.zone_multipliers.Z_0"   (Voronoi zone 0)
+# CALIBRATION FIX: Frozen parameters to preserve original design assumptions:
+#   - demand.demand_multiplier: FROZEN to 1.0 (use original demand values)
+#   - pattern_family.*: FROZEN (preserve original RF_MORN_10, RF_EVE_14, etc. patterns)
+#   - time.duration_days: FROZEN to 1 (no need for 72hr simulations)
+# Only these parameters are free to calibrate:
+#   - pda.* (pressure/demand model settings)
+#   - leakage.global_scale (global leak scaling)
+#   - leakage.zone_multipliers.* (per-zone leak adjustments)
+#   - leakage.emitter_exponent (leak emitter power law exponent)
+#   - solver.* (numerical solver settings)
 OPT_PARAM_PATHS: list[str] = [
-    "demand.demand_multiplier",
+    # PDA model parameters (leave free to calibrate)
     "pda.required_pressure",
     "pda.minimum_pressure",
     "pda.pressure_exponent",
-    # Global 24-hour demand pattern shape parameters (applies to all service nodes).
-    # These control *when* demand happens (centers), how spread it is (widths), and
-    # relative peak strengths (weights). Total daily demand is still controlled by
-    # demand.demand_multiplier because the pattern is normalized to sum to 24.
-    "pattern_family.morning_center",
-    "pattern_family.morning_width",
-    "pattern_family.morning_weight",
-    "pattern_family.noon_center",
-    "pattern_family.noon_width",
-    "pattern_family.noon_weight",
-    "pattern_family.evening_center",
-    "pattern_family.evening_width",
-    "pattern_family.evening_weight",
-    "pattern_family.background_weight",
-    "pattern_family.floor",
+    # Leakage parameters (leave free to calibrate)
     "leakage.global_scale",
     "leakage.emitter_exponent",
+    # NOTE: pattern_family.* parameters are FROZEN to preserve original demand patterns
+    # NOTE: demand.demand_multiplier is FROZEN at 1.0 to use original billing demands
 ]
 
 # Add zone leakage multipliers to the optimization set (one parameter per zone).
@@ -173,27 +166,14 @@ if LEAKS_ENABLED:
 
 # Optional bounds per parameter path.
 # Any param not listed here is left unbounded.
+# CALIBRATION FIX: Only includes bounds for parameters that are actually being optimized.
+# Removed bounds for:
+#   - demand.demand_multiplier (FROZEN at 1.0)
+#   - pattern_family.* (FROZEN to preserve original patterns)
 OPT_BOUNDS: dict[str, tuple[float, float]] = {
-    # Guard rails for parameters that must stay non-negative / positive to satisfy
-    # validation in calibration/parameterization_layer.py.
-    "demand.demand_multiplier": (1e-6, 10.0),
-    # Demand pattern family bounds (see calibration/datamodels.py: PatternFamilyParams).
-    # Centers are hours in [0, 23]. Widths are in hours and must be > 0.
-    # Weights and floor are kept non-negative to avoid negative hourly demands.
-    "pattern_family.morning_center": (0.0, 23.0),
-    "pattern_family.noon_center": (0.0, 23.0),
-    "pattern_family.evening_center": (0.0, 23.0),
-    "pattern_family.morning_width": (0.05, 8.0),
-    "pattern_family.noon_width": (0.05, 8.0),
-    "pattern_family.evening_width": (0.05, 8.0),
-    "pattern_family.morning_weight": (0.0, 5.0),
-    "pattern_family.noon_weight": (0.0, 5.0),
-    "pattern_family.evening_weight": (0.0, 5.0),
-    "pattern_family.background_weight": (0.0, 5.0),
-    # Keep a tiny floor so the pattern sum stays positive even if all weights drift to 0.
-    "pattern_family.floor": (1e-6, 2.0),
-    # Exponents close to zero can lead to numerical issues.
+    # PDA model parameter bounds
     "pda.pressure_exponent": (0.05, 5.0),
+    # Leakage parameter bounds
     "leakage.global_scale": (0.0, 50.0),
     # EPANET emitter law is Q = C * P^n. Extremely small n can produce NaNs
     # (e.g., when pressures dip negative). Keep n in a reasonable range.
@@ -308,8 +288,23 @@ def build_default_raw_params() -> dict:
     """Build default raw parameters with Voronoi zone multipliers.
     
     Zone multipliers are named Z_0, Z_1, Z_2, ... based on sensor count.
+    
+    CALIBRATION FIX: Frozen parameters to preserve original model design:
+    - demand.demand_multiplier is set to 1.0 (use original billing demands)
+    - time.duration_days is set to 1 (1-day simulation cycle)
+    - pattern_family.* parameters are not modified (original patterns preserved)
     """
     raw = build_example_raw_params()
+
+    # CALIBRATION FIX: Explicitly freeze demand_multiplier at 1.0
+    # This ensures calibration uses original demand values from INP file
+    dm = raw.setdefault("demand", {})
+    dm["demand_multiplier"] = 1.0
+    
+    # CALIBRATION FIX: Explicitly freeze duration_days at 1
+    # This ensures 24-hour pattern repeats without multi-day carry-over
+    tm = raw.setdefault("time", {})
+    tm["duration_days"] = 1
 
     # Seed zone multipliers for whichever zones exist (Voronoi-based)
     lk = raw.setdefault("leakage", {})
