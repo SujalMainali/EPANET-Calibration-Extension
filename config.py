@@ -105,6 +105,33 @@ DEBUG_DIR = OUTPUT_DIR / "debug"
 REPORTS_DIR = OUTPUT_DIR / "reports"
 
 
+# ---- Observation validation and signal smoothing ----
+# Validate complete observed days and optionally fold them into one
+# representative daily pressure profile per sensor.
+OBSERVATION_VALIDATION_ENABLED: bool = True
+OBSERVATION_POINTS_PER_DAY: int = 24
+# True: aggregate all days into one representative day.
+# False: retain every day and smooth each day independently.
+OBSERVATION_FOLD_DAYS_ENABLED: bool = True
+OBSERVATION_FOLD_AGGREGATION: str = "mean"  # "mean" or "median"
+OBSERVATION_INTERPOLATE_MISSING: bool = True
+OBSERVATION_REQUIRE_COMPLETE_DAYS: bool = True
+
+# Fourier low-pass smoothing. With hourly data, harmonic 6 corresponds to a
+# four-hour period; shorter oscillations are treated as measurement noise.
+OBSERVATION_SMOOTHING_ENABLED: bool = True
+OBSERVATION_SMOOTHING_MAX_HARMONIC: int = 6
+
+# Numerical validation tolerances.
+OBSERVATION_MASS_REL_TOL: float = 1e-10
+OBSERVATION_PARSEVAL_REL_TOL: float = 1e-10
+
+# Export the folded profile, smoothed profile, spectrum, and exact optimizer
+# target for auditing.
+OBSERVATION_EXPORT_STAGES: bool = True
+OBSERVATION_VALIDATION_DIR = DEBUG_DIR / "validation"
+
+
 # ---- Output toggles ----
 SAVE_CSV = True
 SAVE_DEBUG_JSON = True

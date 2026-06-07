@@ -36,6 +36,7 @@ from calibration.objective import (
     load_observed_pressure_csv,
 )
 from calibration.runner import build_runner
+from validation_layer import PreprocessingValidationLayer
 
 
 # =============================================================================
@@ -166,7 +167,7 @@ def load_observed_multi_day() -> tuple[pd.DataFrame, int]:
 
     if config.OBSERVED_PRESSURE_CSVS:
 
-        dfs = []
+        dfs: list[pd.DataFrame] = []
 
         for i, p in enumerate(config.OBSERVED_PRESSURE_CSVS):
 
@@ -202,6 +203,35 @@ def load_observed_multi_day() -> tuple[pd.DataFrame, int]:
     n_days = int(max(1, int(np.ceil((span + 1.0) / 86400.0))))
 
     return df, n_days
+
+
+def validate_and_smooth_observed(
+    observed: pd.DataFrame,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Prepare the exact pressure target used by objective evaluations."""
+
+    if not config.OBSERVATION_VALIDATION_ENABLED:
+        return observed, {"enabled": False}
+
+    layer = PreprocessingValidationLayer(
+        sensor_nodes=list(config.SENSOR_NODES),
+        points_per_day=int(config.OBSERVATION_POINTS_PER_DAY),
+        fold_days_enabled=bool(config.OBSERVATION_FOLD_DAYS_ENABLED),
+        fold_aggregation=str(config.OBSERVATION_FOLD_AGGREGATION),
+        smoothing_enabled=bool(config.OBSERVATION_SMOOTHING_ENABLED),
+        smoothing_max_harmonic=int(
+            config.OBSERVATION_SMOOTHING_MAX_HARMONIC
+        ),
+        interpolate_missing=bool(config.OBSERVATION_INTERPOLATE_MISSING),
+        require_complete_days=bool(config.OBSERVATION_REQUIRE_COMPLETE_DAYS),
+        mass_relative_tolerance=float(config.OBSERVATION_MASS_REL_TOL),
+        parseval_relative_tolerance=float(config.OBSERVATION_PARSEVAL_REL_TOL),
+        export_stages=bool(config.OBSERVATION_EXPORT_STAGES),
+        output_dir=config.OBSERVATION_VALIDATION_DIR,
+        verbose=bool(config.VERBOSE),
+    )
+    result = layer.process_and_validate(observed)
+    return result.calibration_data, {"enabled": True, **result.summary}
 
 
 # =============================================================================
@@ -397,6 +427,8 @@ def main() -> None:
     run_dir = _prepare_run_dir(args.run_no)
 
     observed, n_days = load_observed_multi_day()
+    observed, observation_preprocessing = validate_and_smooth_observed(observed)
+    n_days = int(observation_preprocessing.get("num_days", n_days))
 
     metadata = config.build_default_metadata()
 
@@ -412,6 +444,7 @@ def main() -> None:
 
     print(f"Optimizer run dir: {run_dir}")
     print(f"Observed days: {n_days}")
+    print(f"Observation preprocessing: {observation_preprocessing}")
     print(f"Metadata: {metadata_info}")
 
     # =============================================================================
@@ -507,7 +540,7 @@ def main() -> None:
 
     lr = float(config.OPT_LEARNING_RATE)
 
-    history_rows = []
+    history_rows: list[dict[str, float | int]] = []
 
     # =============================================================================
     # OPTIMIZATION LOOP
@@ -529,7 +562,7 @@ def main() -> None:
         # COMPUTE GRADIENTS
         # ---------------------------------------------------------------------
 
-        grads = {}
+        grads: dict[str, float] = {}
 
         for p in config.OPT_PARAM_PATHS:
 
@@ -584,7 +617,7 @@ def main() -> None:
 
         max_backtracks = 12
 
-        proposal = None
+        proposal: Dict[str, Any] = copy.deepcopy(raw_params)
         new_J = cur_J
         new_breakdown = cur_breakdown
 
@@ -694,6 +727,7 @@ def main() -> None:
         "best_raw_params": best_params,
         "optimized_paths": list(config.OPT_PARAM_PATHS),
         "n_days": int(n_days),
+        "observation_preprocessing": observation_preprocessing,
         "metadata": metadata_info,  # Include extracted metadata
     }
 
