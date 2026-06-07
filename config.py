@@ -42,8 +42,8 @@ OBSERVED_PRESSURE_CSV: str | None = None
 # column name must be the same across files if you set OBSERVED_TIME_COLUMN.
 OBSERVED_PRESSURE_CSVS: list[str] | None = [
     "Data/HourlyData_2025-12-18.csv",
-    "Data/HourlyData_2025-12-19.csv",
-    "Data/HourlyData_2025-12-20.csv",
+    #"Data/HourlyData_2025-12-19.csv",
+    #"Data/HourlyData_2025-12-20.csv",
 ]
 
 # Optional: if your observed CSV's time column is NOT the first column, set it here.
@@ -116,11 +116,11 @@ VERBOSE = True
 #   J = w_ts*J_timeseries + w_feat*J_features + w_sp*J_spatial + w_vol*J_volume + w_reg*J_regularization
 # Used by optimize.py (and compare.py).
 OBJECTIVE_WEIGHTS: dict[str, float] = {
-    "w_ts": 0.25,
-    "w_feat": 0.35,
-    "w_sp": 0.15,
-    "w_vol": 0.10,
-    "w_reg": 0.05,
+    "w_ts": 1.0,
+    "w_feat": 0.0,
+    "w_sp": 0.0,
+    "w_vol": 0.0,
+    "w_reg": 0.0,
 }
 
 

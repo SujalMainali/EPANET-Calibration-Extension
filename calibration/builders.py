@@ -384,15 +384,15 @@ def build_example_raw_params() -> dict:
         "pattern_family": {
             "morning_center": 6.0,
             "morning_width": 1.5,
-            "morning_weight": 0.30,
+            "morning_weight": 0.31,
             "noon_center": 14.0,
             "noon_width": 1.0,
             "noon_weight": 0.27,
             "evening_center": 21.0,
             "evening_width": 0.5,
-            "evening_weight": 0.28,
+            "evening_weight": 0.30,
             "background_weight": 0.20,
-            "floor": 0.02,
+            "floor": 0.004,
         },
         "carryover": {
             "enabled": False,
@@ -400,12 +400,12 @@ def build_example_raw_params() -> dict:
             "max_carryover_multiplier": 2.0,
         },
         "leakage": {
-            "global_scale": 0.4,
+            "global_scale": 0.002,
             "zone_multipliers": {},
             "emitter_exponent": 1.0,
         },
         "demand": {
-            "demand_multiplier": 1.0,
+            "demand_multiplier": 2.2,
         },
         "time": {
             "duration_days": 1,

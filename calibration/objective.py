@@ -32,11 +32,11 @@ _EPS = 1e-12
 
 @dataclass(frozen=True)
 class ObjectiveWeights:
-    w_ts: float = 0.40
-    w_feat: float = 0.30
-    w_sp: float = 0.15
-    w_vol: float = 0.10
-    w_reg: float = 0.05
+    w_ts: float = 1.0
+    w_feat: float = 0.00
+    w_sp: float = 0.0
+    w_vol: float = 0.00
+    w_reg: float = 0.00
 
 
 @dataclass(frozen=True)
