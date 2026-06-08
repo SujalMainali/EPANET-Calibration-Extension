@@ -131,6 +131,11 @@ OBSERVATION_PARSEVAL_REL_TOL: float = 1e-10
 OBSERVATION_EXPORT_STAGES: bool = True
 OBSERVATION_VALIDATION_DIR = DEBUG_DIR / "validation"
 
+# Saved processed observation dataset used by optimization and result plots.
+# If recompute is False and this CSV exists, the calibration scripts reuse it.
+OBSERVATION_SMOOTHED_DATASET_CSV = OUTPUT_DIR / "datasets" / "observed_pressure_smoothed.csv"
+OBSERVATION_RECOMPUTE_SMOOTHED_DATASET: bool = True
+
 
 # ---- Output toggles ----
 SAVE_CSV = True

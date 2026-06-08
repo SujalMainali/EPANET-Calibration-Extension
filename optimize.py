@@ -33,10 +33,15 @@ import config
 from calibration.objective import (
     ObjectiveConfig,
     ObjectiveWeights,
+    build_default_regularization_from_params,
     load_observed_pressure_csv,
 )
 from calibration.runner import build_runner
-from validation_layer import PreprocessingValidationLayer
+from validation_layer import (
+    PreprocessingValidationLayer,
+    load_processed_observation_dataset,
+    save_processed_observation_dataset,
+)
 
 
 # =============================================================================
@@ -205,6 +210,13 @@ def load_observed_multi_day() -> tuple[pd.DataFrame, int]:
     return df, n_days
 
 
+def _infer_n_days_from_index(observed: pd.DataFrame) -> int:
+    if len(observed.index) == 0:
+        return 1
+    span = float(observed.index.max() - observed.index.min())
+    return int(max(1, int(np.ceil((span + 1.0) / 86400.0))))
+
+
 def validate_and_smooth_observed(
     observed: pd.DataFrame,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
@@ -212,6 +224,23 @@ def validate_and_smooth_observed(
 
     if not config.OBSERVATION_VALIDATION_ENABLED:
         return observed, {"enabled": False}
+
+    dataset_path = Path(config.OBSERVATION_SMOOTHED_DATASET_CSV)
+    recompute = bool(config.OBSERVATION_RECOMPUTE_SMOOTHED_DATASET)
+    if dataset_path.exists() and not recompute:
+        processed = load_processed_observation_dataset(
+            dataset_path,
+            list(config.SENSOR_NODES),
+        )
+        return (
+            processed,
+            {
+                "enabled": True,
+                "source": "cached_dataset",
+                "dataset_path": str(dataset_path),
+                "recomputed": False,
+            },
+        )
 
     layer = PreprocessingValidationLayer(
         sensor_nodes=list(config.SENSOR_NODES),
@@ -231,7 +260,47 @@ def validate_and_smooth_observed(
         verbose=bool(config.VERBOSE),
     )
     result = layer.process_and_validate(observed)
-    return result.calibration_data, {"enabled": True, **result.summary}
+    save_processed_observation_dataset(result.calibration_data, dataset_path)
+    return (
+        result.calibration_data,
+        {
+            "enabled": True,
+            "source": "generated_dataset",
+            "dataset_path": str(dataset_path),
+            "recomputed": True,
+            **result.summary,
+        },
+    )
+
+
+def load_calibration_observed() -> tuple[pd.DataFrame, int, dict[str, Any]]:
+    """Load the observed pressure target used by optimization/results."""
+
+    dataset_path = Path(config.OBSERVATION_SMOOTHED_DATASET_CSV)
+    if (
+        config.OBSERVATION_VALIDATION_ENABLED
+        and dataset_path.exists()
+        and not config.OBSERVATION_RECOMPUTE_SMOOTHED_DATASET
+    ):
+        processed = load_processed_observation_dataset(
+            dataset_path,
+            list(config.SENSOR_NODES),
+        )
+        return (
+            processed,
+            _infer_n_days_from_index(processed),
+            {
+                "enabled": True,
+                "source": "cached_dataset",
+                "dataset_path": str(dataset_path),
+                "recomputed": False,
+            },
+        )
+
+    observed, n_days = load_observed_multi_day()
+    processed, summary = validate_and_smooth_observed(observed)
+    n_days = int(summary.get("num_days", n_days))
+    return processed, n_days, summary
 
 
 # =============================================================================
@@ -314,19 +383,68 @@ def _safe_clip(path: str, value: float) -> float:
 # OBJECTIVE CONFIG
 # =============================================================================
 
-def _objective_config_from_config() -> ObjectiveConfig:
+OBJECTIVE_WEIGHT_KEYS = ("w_ts", "w_feat", "w_sp", "w_vol", "w_reg")
 
-    w = getattr(config, "OBJECTIVE_WEIGHTS", None) or {}
 
-    ow = ObjectiveWeights(
-        w_ts=float(w.get("w_ts", 0.40)),
-        w_feat=float(w.get("w_feat", 0.30)),
-        w_sp=float(w.get("w_sp", 0.15)),
-        w_vol=float(w.get("w_vol", 0.10)),
-        w_reg=float(w.get("w_reg", 0.05)),
+def _objective_weights_from_config() -> ObjectiveWeights:
+    """Build objective weights from config.py with no silent fallbacks."""
+
+    w = getattr(config, "OBJECTIVE_WEIGHTS", None)
+    if not isinstance(w, dict):
+        raise TypeError("config.OBJECTIVE_WEIGHTS must be a dict")
+
+    missing = [key for key in OBJECTIVE_WEIGHT_KEYS if key not in w]
+    extra = [key for key in w if key not in OBJECTIVE_WEIGHT_KEYS]
+    if missing or extra:
+        raise ValueError(
+            "config.OBJECTIVE_WEIGHTS must contain exactly "
+            f"{list(OBJECTIVE_WEIGHT_KEYS)}; missing={missing}, extra={extra}"
+        )
+
+    values = {key: float(w[key]) for key in OBJECTIVE_WEIGHT_KEYS}
+    invalid = [
+        key
+        for key, value in values.items()
+        if not np.isfinite(value) or value < 0.0
+    ]
+    if invalid:
+        raise ValueError(
+            "config.OBJECTIVE_WEIGHTS values must be finite and non-negative; "
+            f"invalid={invalid}"
+        )
+
+    return ObjectiveWeights(**values)
+
+
+def _objective_config_from_config(
+    *,
+    runner: Any,
+    raw_params: Dict[str, Any],
+    metadata: Any,
+) -> ObjectiveConfig:
+    """Create the single objective config used by loss, gradients, and search.
+
+    The top-level component weights come only from config.OBJECTIVE_WEIGHTS.
+    Regularization priors are frozen once from the initial optimizer parameter
+    state instead of being rebuilt during finite-difference perturbations.
+    """
+
+    params = runner.parameterization.from_dict(raw_params)
+    return ObjectiveConfig(
+        weights=_objective_weights_from_config(),
+        regularization=build_default_regularization_from_params(params, metadata),
     )
 
-    return ObjectiveConfig(weights=ow)
+
+def _objective_weights_dict(obj_cfg: ObjectiveConfig) -> dict[str, float]:
+    w = obj_cfg.weights
+    return {
+        "w_ts": float(w.w_ts),
+        "w_feat": float(w.w_feat),
+        "w_sp": float(w.w_sp),
+        "w_vol": float(w.w_vol),
+        "w_reg": float(w.w_reg),
+    }
 
 
 # =============================================================================
@@ -426,9 +544,7 @@ def main() -> None:
 
     run_dir = _prepare_run_dir(args.run_no)
 
-    observed, n_days = load_observed_multi_day()
-    observed, observation_preprocessing = validate_and_smooth_observed(observed)
-    n_days = int(observation_preprocessing.get("num_days", n_days))
+    observed, n_days, observation_preprocessing = load_calibration_observed()
 
     metadata = config.build_default_metadata()
 
@@ -436,8 +552,6 @@ def main() -> None:
         inp_path=config.MODEL_INP,
         metadata=metadata,
     )
-
-    obj_cfg = _objective_config_from_config()
 
     # Extract metadata safely
     metadata_info = _extract_metadata_info(metadata)
@@ -481,7 +595,15 @@ def main() -> None:
         except Exception:
             continue
 
+    obj_cfg = _objective_config_from_config(
+        runner=runner,
+        raw_params=raw_params,
+        metadata=metadata,
+    )
+    active_objective_weights = _objective_weights_dict(obj_cfg)
+
     print(f"Optimizing {len(config.OPT_PARAM_PATHS)} parameters")
+    print(f"Objective weights: {active_objective_weights}")
 
     # =============================================================================
     # OBJECTIVE EVALUATION
@@ -555,6 +677,17 @@ def main() -> None:
             "J_total": float(cur_J),
             "lr": float(lr),
         }
+        row.update(
+            {
+                "wJ_timeseries": float(cur_breakdown.get("wJ_timeseries", 0.0)),
+                "wJ_features": float(cur_breakdown.get("wJ_features", 0.0)),
+                "wJ_spatial": float(cur_breakdown.get("wJ_spatial", 0.0)),
+                "wJ_volume": float(cur_breakdown.get("wJ_volume", 0.0)),
+                "wJ_regularization": float(
+                    cur_breakdown.get("wJ_regularization", 0.0)
+                ),
+            }
+        )
 
         history_rows.append(row)
 
@@ -603,9 +736,11 @@ def main() -> None:
                         (j_plus - j_minus)
                         / (2.0 * eps)
                     )
+                row[f"grad.{p}"] = float(grads[p])
 
             except Exception:
                 grads[p] = 0.0
+                row[f"grad.{p}"] = 0.0
 
         # ---------------------------------------------------------------------
         # BACKTRACKING LINE SEARCH
@@ -726,6 +861,7 @@ def main() -> None:
         "best_breakdown": best_breakdown,
         "best_raw_params": best_params,
         "optimized_paths": list(config.OPT_PARAM_PATHS),
+        "objective_weights": active_objective_weights,
         "n_days": int(n_days),
         "observation_preprocessing": observation_preprocessing,
         "metadata": metadata_info,  # Include extracted metadata
