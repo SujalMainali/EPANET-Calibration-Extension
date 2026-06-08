@@ -33,6 +33,7 @@ import config
 from calibration.objective import (
     ObjectiveConfig,
     ObjectiveWeights,
+    build_default_regularization_from_params,
     load_observed_pressure_csv,
 )
 from calibration.runner import build_runner
@@ -382,19 +383,68 @@ def _safe_clip(path: str, value: float) -> float:
 # OBJECTIVE CONFIG
 # =============================================================================
 
-def _objective_config_from_config() -> ObjectiveConfig:
+OBJECTIVE_WEIGHT_KEYS = ("w_ts", "w_feat", "w_sp", "w_vol", "w_reg")
 
-    w = getattr(config, "OBJECTIVE_WEIGHTS", None) or {}
 
-    ow = ObjectiveWeights(
-        w_ts=float(w.get("w_ts", 0.40)),
-        w_feat=float(w.get("w_feat", 0.30)),
-        w_sp=float(w.get("w_sp", 0.15)),
-        w_vol=float(w.get("w_vol", 0.10)),
-        w_reg=float(w.get("w_reg", 0.05)),
+def _objective_weights_from_config() -> ObjectiveWeights:
+    """Build objective weights from config.py with no silent fallbacks."""
+
+    w = getattr(config, "OBJECTIVE_WEIGHTS", None)
+    if not isinstance(w, dict):
+        raise TypeError("config.OBJECTIVE_WEIGHTS must be a dict")
+
+    missing = [key for key in OBJECTIVE_WEIGHT_KEYS if key not in w]
+    extra = [key for key in w if key not in OBJECTIVE_WEIGHT_KEYS]
+    if missing or extra:
+        raise ValueError(
+            "config.OBJECTIVE_WEIGHTS must contain exactly "
+            f"{list(OBJECTIVE_WEIGHT_KEYS)}; missing={missing}, extra={extra}"
+        )
+
+    values = {key: float(w[key]) for key in OBJECTIVE_WEIGHT_KEYS}
+    invalid = [
+        key
+        for key, value in values.items()
+        if not np.isfinite(value) or value < 0.0
+    ]
+    if invalid:
+        raise ValueError(
+            "config.OBJECTIVE_WEIGHTS values must be finite and non-negative; "
+            f"invalid={invalid}"
+        )
+
+    return ObjectiveWeights(**values)
+
+
+def _objective_config_from_config(
+    *,
+    runner: Any,
+    raw_params: Dict[str, Any],
+    metadata: Any,
+) -> ObjectiveConfig:
+    """Create the single objective config used by loss, gradients, and search.
+
+    The top-level component weights come only from config.OBJECTIVE_WEIGHTS.
+    Regularization priors are frozen once from the initial optimizer parameter
+    state instead of being rebuilt during finite-difference perturbations.
+    """
+
+    params = runner.parameterization.from_dict(raw_params)
+    return ObjectiveConfig(
+        weights=_objective_weights_from_config(),
+        regularization=build_default_regularization_from_params(params, metadata),
     )
 
-    return ObjectiveConfig(weights=ow)
+
+def _objective_weights_dict(obj_cfg: ObjectiveConfig) -> dict[str, float]:
+    w = obj_cfg.weights
+    return {
+        "w_ts": float(w.w_ts),
+        "w_feat": float(w.w_feat),
+        "w_sp": float(w.w_sp),
+        "w_vol": float(w.w_vol),
+        "w_reg": float(w.w_reg),
+    }
 
 
 # =============================================================================
@@ -503,8 +553,6 @@ def main() -> None:
         metadata=metadata,
     )
 
-    obj_cfg = _objective_config_from_config()
-
     # Extract metadata safely
     metadata_info = _extract_metadata_info(metadata)
 
@@ -547,7 +595,15 @@ def main() -> None:
         except Exception:
             continue
 
+    obj_cfg = _objective_config_from_config(
+        runner=runner,
+        raw_params=raw_params,
+        metadata=metadata,
+    )
+    active_objective_weights = _objective_weights_dict(obj_cfg)
+
     print(f"Optimizing {len(config.OPT_PARAM_PATHS)} parameters")
+    print(f"Objective weights: {active_objective_weights}")
 
     # =============================================================================
     # OBJECTIVE EVALUATION
@@ -621,6 +677,17 @@ def main() -> None:
             "J_total": float(cur_J),
             "lr": float(lr),
         }
+        row.update(
+            {
+                "wJ_timeseries": float(cur_breakdown.get("wJ_timeseries", 0.0)),
+                "wJ_features": float(cur_breakdown.get("wJ_features", 0.0)),
+                "wJ_spatial": float(cur_breakdown.get("wJ_spatial", 0.0)),
+                "wJ_volume": float(cur_breakdown.get("wJ_volume", 0.0)),
+                "wJ_regularization": float(
+                    cur_breakdown.get("wJ_regularization", 0.0)
+                ),
+            }
+        )
 
         history_rows.append(row)
 
@@ -669,9 +736,11 @@ def main() -> None:
                         (j_plus - j_minus)
                         / (2.0 * eps)
                     )
+                row[f"grad.{p}"] = float(grads[p])
 
             except Exception:
                 grads[p] = 0.0
+                row[f"grad.{p}"] = 0.0
 
         # ---------------------------------------------------------------------
         # BACKTRACKING LINE SEARCH
@@ -792,6 +861,7 @@ def main() -> None:
         "best_breakdown": best_breakdown,
         "best_raw_params": best_params,
         "optimized_paths": list(config.OPT_PARAM_PATHS),
+        "objective_weights": active_objective_weights,
         "n_days": int(n_days),
         "observation_preprocessing": observation_preprocessing,
         "metadata": metadata_info,  # Include extracted metadata

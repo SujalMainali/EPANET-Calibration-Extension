@@ -190,8 +190,9 @@ def compute_objective(
     if config is None:
         config = ObjectiveConfig()
 
-    if not config.regularization.priors:
-        config.regularization = build_default_regularization_from_params(params, metadata)
+    regularization = config.regularization
+    if not regularization.priors:
+        regularization = build_default_regularization_from_params(params, metadata)
 
     sim_pressure = results["pressure"]
     sim_demand = results["demand"]
@@ -212,7 +213,7 @@ def compute_objective(
     j_feat = _j_features(obs_aligned, sim_aligned, sw, config.features)
     j_sp = _j_spatial(obs_aligned, sim_aligned, sw, config.spatial)
     j_vol = _j_volume(params, metadata, sim_demand, config.volume)
-    j_reg = _j_regularization(params, config.regularization)
+    j_reg = _j_regularization(params, regularization)
 
     w = config.weights
     j_total = w.w_ts * j_ts + w.w_feat * j_feat + w.w_sp * j_sp + w.w_vol * j_vol + w.w_reg * j_reg
