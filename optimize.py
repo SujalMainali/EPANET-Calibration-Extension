@@ -36,7 +36,11 @@ from calibration.objective import (
     load_observed_pressure_csv,
 )
 from calibration.runner import build_runner
-from validation_layer import PreprocessingValidationLayer
+from validation_layer import (
+    PreprocessingValidationLayer,
+    load_processed_observation_dataset,
+    save_processed_observation_dataset,
+)
 
 
 # =============================================================================
@@ -205,6 +209,13 @@ def load_observed_multi_day() -> tuple[pd.DataFrame, int]:
     return df, n_days
 
 
+def _infer_n_days_from_index(observed: pd.DataFrame) -> int:
+    if len(observed.index) == 0:
+        return 1
+    span = float(observed.index.max() - observed.index.min())
+    return int(max(1, int(np.ceil((span + 1.0) / 86400.0))))
+
+
 def validate_and_smooth_observed(
     observed: pd.DataFrame,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
@@ -212,6 +223,23 @@ def validate_and_smooth_observed(
 
     if not config.OBSERVATION_VALIDATION_ENABLED:
         return observed, {"enabled": False}
+
+    dataset_path = Path(config.OBSERVATION_SMOOTHED_DATASET_CSV)
+    recompute = bool(config.OBSERVATION_RECOMPUTE_SMOOTHED_DATASET)
+    if dataset_path.exists() and not recompute:
+        processed = load_processed_observation_dataset(
+            dataset_path,
+            list(config.SENSOR_NODES),
+        )
+        return (
+            processed,
+            {
+                "enabled": True,
+                "source": "cached_dataset",
+                "dataset_path": str(dataset_path),
+                "recomputed": False,
+            },
+        )
 
     layer = PreprocessingValidationLayer(
         sensor_nodes=list(config.SENSOR_NODES),
@@ -231,7 +259,47 @@ def validate_and_smooth_observed(
         verbose=bool(config.VERBOSE),
     )
     result = layer.process_and_validate(observed)
-    return result.calibration_data, {"enabled": True, **result.summary}
+    save_processed_observation_dataset(result.calibration_data, dataset_path)
+    return (
+        result.calibration_data,
+        {
+            "enabled": True,
+            "source": "generated_dataset",
+            "dataset_path": str(dataset_path),
+            "recomputed": True,
+            **result.summary,
+        },
+    )
+
+
+def load_calibration_observed() -> tuple[pd.DataFrame, int, dict[str, Any]]:
+    """Load the observed pressure target used by optimization/results."""
+
+    dataset_path = Path(config.OBSERVATION_SMOOTHED_DATASET_CSV)
+    if (
+        config.OBSERVATION_VALIDATION_ENABLED
+        and dataset_path.exists()
+        and not config.OBSERVATION_RECOMPUTE_SMOOTHED_DATASET
+    ):
+        processed = load_processed_observation_dataset(
+            dataset_path,
+            list(config.SENSOR_NODES),
+        )
+        return (
+            processed,
+            _infer_n_days_from_index(processed),
+            {
+                "enabled": True,
+                "source": "cached_dataset",
+                "dataset_path": str(dataset_path),
+                "recomputed": False,
+            },
+        )
+
+    observed, n_days = load_observed_multi_day()
+    processed, summary = validate_and_smooth_observed(observed)
+    n_days = int(summary.get("num_days", n_days))
+    return processed, n_days, summary
 
 
 # =============================================================================
@@ -426,9 +494,7 @@ def main() -> None:
 
     run_dir = _prepare_run_dir(args.run_no)
 
-    observed, n_days = load_observed_multi_day()
-    observed, observation_preprocessing = validate_and_smooth_observed(observed)
-    n_days = int(observation_preprocessing.get("num_days", n_days))
+    observed, n_days, observation_preprocessing = load_calibration_observed()
 
     metadata = config.build_default_metadata()
 

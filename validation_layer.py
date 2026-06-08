@@ -19,6 +19,43 @@ from numpy.typing import NDArray
 FloatArray = NDArray[np.float64]
 
 
+def load_processed_observation_dataset(
+    path: str | Path,
+    sensor_nodes: list[str],
+) -> pd.DataFrame:
+    """Load a saved calibration-ready observed pressure dataset."""
+
+    df = pd.read_csv(path)
+    if df.shape[1] < 2:
+        raise ValueError(f"Processed observation dataset must have time + sensors: {path}")
+
+    time_col = df.columns[0]
+    df = df.set_index(time_col)
+    df.index = pd.Index(pd.to_numeric(df.index.to_numpy()), name=str(time_col))
+
+    missing = [sensor for sensor in sensor_nodes if sensor not in df.columns]
+    if missing:
+        raise ValueError(
+            f"Processed observation dataset {path} is missing sensor columns: {missing}"
+        )
+
+    out = df[sensor_nodes].apply(pd.to_numeric, errors="coerce")
+    if not np.isfinite(out.to_numpy(dtype=float)).all():
+        raise ValueError(f"Processed observation dataset contains non-finite values: {path}")
+    return out
+
+
+def save_processed_observation_dataset(
+    observed: pd.DataFrame,
+    path: str | Path,
+) -> None:
+    """Save calibration-ready observed pressure data with a reusable time index."""
+
+    out_path = Path(path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    observed.to_csv(out_path, index=True, index_label=observed.index.name or "time_seconds")
+
+
 @dataclass(frozen=True)
 class ValidationResult:
     calibration_data: pd.DataFrame

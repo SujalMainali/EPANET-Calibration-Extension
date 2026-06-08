@@ -31,6 +31,7 @@ import pandas as pd
 import config
 from calibration.objective import load_observed_pressure_csv
 from calibration.runner import RunResults, build_runner
+from optimize import load_calibration_observed
 
 
 def _ensure_dirs() -> Path:
@@ -192,7 +193,7 @@ def main() -> None:
 
     plot_dir = _ensure_dirs()
 
-    observed, n_days = load_observed_multi_day()
+    observed, n_days, observation_preprocessing = load_calibration_observed()
     metadata = config.build_default_metadata()
 
     try:
@@ -339,6 +340,7 @@ def main() -> None:
     plt.close(fig)
 
     if config.VERBOSE:
+        print(f"Observation preprocessing: {observation_preprocessing}")
         print(f"Wrote plots to: {plot_dir}")
 
 
