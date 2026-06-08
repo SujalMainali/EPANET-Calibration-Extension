@@ -331,6 +331,44 @@ def _set_by_path(d: Dict[str, Any], path: str, value: float) -> None:
     cur[parts[-1]] = float(value)
 
 
+def _expand_opt_param_paths(
+    paths: list[str],
+    raw_params: Dict[str, Any],
+) -> list[str]:
+    """Expand wildcard optimizer paths like pattern_family.* into leaf paths."""
+
+    expanded: list[str] = []
+    seen: set[str] = set()
+
+    for path in paths:
+        if not path.endswith(".*"):
+            candidates = [path]
+        else:
+            parent_path = path[:-2]
+            try:
+                parent: Any = raw_params
+                for part in parent_path.split("."):
+                    parent = parent[part]
+            except Exception as exc:
+                raise KeyError(
+                    f"Cannot expand optimizer wildcard path {path!r}"
+                ) from exc
+
+            if not isinstance(parent, dict):
+                raise TypeError(
+                    f"Optimizer wildcard path {path!r} must point to a dict"
+                )
+
+            candidates = [f"{parent_path}.{key}" for key in parent.keys()]
+
+        for candidate in candidates:
+            if candidate not in seen:
+                expanded.append(candidate)
+                seen.add(candidate)
+
+    return expanded
+
+
 # =============================================================================
 # SAFE PARAMETER CLIPPING
 # =============================================================================
@@ -587,7 +625,12 @@ def main() -> None:
     # APPLY SAFE CLIPPING
     # =============================================================================
 
-    for p in config.OPT_PARAM_PATHS:
+    opt_param_paths = _expand_opt_param_paths(
+        list(config.OPT_PARAM_PATHS),
+        raw_params,
+    )
+
+    for p in opt_param_paths:
 
         try:
             x = _get_by_path(raw_params, p)
@@ -602,7 +645,7 @@ def main() -> None:
     )
     active_objective_weights = _objective_weights_dict(obj_cfg)
 
-    print(f"Optimizing {len(config.OPT_PARAM_PATHS)} parameters")
+    print(f"Optimizing {len(opt_param_paths)} parameters")
     print(f"Objective weights: {active_objective_weights}")
 
     # =============================================================================
@@ -697,7 +740,7 @@ def main() -> None:
 
         grads: dict[str, float] = {}
 
-        for p in config.OPT_PARAM_PATHS:
+        for p in opt_param_paths:
 
             try:
 
@@ -760,7 +803,7 @@ def main() -> None:
 
             proposal = copy.deepcopy(raw_params)
 
-            for p in config.OPT_PARAM_PATHS:
+            for p in opt_param_paths:
 
                 try:
 
@@ -860,7 +903,8 @@ def main() -> None:
         "best_J_total": float(best_J),
         "best_breakdown": best_breakdown,
         "best_raw_params": best_params,
-        "optimized_paths": list(config.OPT_PARAM_PATHS),
+        "optimized_paths": list(opt_param_paths),
+        "configured_optimized_paths": list(config.OPT_PARAM_PATHS),
         "objective_weights": active_objective_weights,
         "n_days": int(n_days),
         "observation_preprocessing": observation_preprocessing,

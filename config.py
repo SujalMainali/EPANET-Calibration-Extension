@@ -161,13 +161,13 @@ OBJECTIVE_WEIGHTS: dict[str, float] = {
 # Which raw parameter paths to optimize.
 # CALIBRATION FIX: Frozen parameters to preserve original design assumptions:
 #   - demand.demand_multiplier: FROZEN to 1.0 (use original demand values)
-#   - pattern_family.*: FROZEN (preserve original RF_MORN_10, RF_EVE_14, etc. patterns)
 #   - time.duration_days: FROZEN to 1 (no need for 72hr simulations)
 # Only these parameters are free to calibrate:
 #   - pda.* (pressure/demand model settings)
 #   - leakage.global_scale (global leak scaling)
 #   - leakage.zone_multipliers.* (per-zone leak adjustments)
 #   - leakage.emitter_exponent (leak emitter power law exponent)
+#   - pattern_family.* (expanded by optimize.py to every pattern-family leaf)
 #   - solver.* (numerical solver settings)
 OPT_PARAM_PATHS: list[str] = [
     # PDA model parameters (leave free to calibrate)
@@ -177,7 +177,7 @@ OPT_PARAM_PATHS: list[str] = [
     # Leakage parameters (leave free to calibrate)
     "leakage.global_scale",
     "leakage.emitter_exponent",
-    # NOTE: pattern_family.* parameters are FROZEN to preserve original demand patterns
+    "pattern_family.*",
     # NOTE: demand.demand_multiplier is FROZEN at 1.0 to use original billing demands
 ]
 
@@ -201,7 +201,6 @@ if LEAKS_ENABLED:
 # CALIBRATION FIX: Only includes bounds for parameters that are actually being optimized.
 # Removed bounds for:
 #   - demand.demand_multiplier (FROZEN at 1.0)
-#   - pattern_family.* (FROZEN to preserve original patterns)
 OPT_BOUNDS: dict[str, tuple[float, float]] = {
     # PDA model parameter bounds
     "pda.pressure_exponent": (0.05, 5.0),
